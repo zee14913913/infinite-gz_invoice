@@ -150,6 +150,102 @@ AST_PRODUCTS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════
+#  Package Definitions  (Combination 2: Predefined + Auto Sub-items)
+# ══════════════════════════════════════════════════════════════════════
+
+# Format: { "Package Name": ["sub-item 1", "sub-item 2", ...] }
+
+AST_PACKAGES = {
+    "": [],
+    "Starter Digital Package": [
+        "Website Development (Basic)",
+        "Brand Identity Design (Logo + Business Card)",
+        "Social Media Setup & Optimization",
+        "Technical Support – Basic (3 Months)",
+    ],
+    "Business Growth Package": [
+        "Website Development (Corporate)",
+        "CRM System – Basic",
+        "AI Chatbot Integration – Basic",
+        "Digital Marketing Strategy & Consultation",
+        "SEO Optimization (On-Page)",
+        "Technical Support – Standard (6 Months)",
+    ],
+    "Enterprise Digital Package": [
+        "Website Development (E-Commerce)",
+        "Mobile App Development – Basic (iOS + Android)",
+        "CRM System – Advanced",
+        "AI Chatbot Integration – Advanced",
+        "Cloud Infrastructure Setup & Migration",
+        "Cybersecurity Audit & Implementation",
+        "Technical Support – Premium (12 Months)",
+    ],
+    "Premium AI Suite": [
+        "Custom AI Solution Development",
+        "Mobile App Development – Advanced (iOS + Android)",
+        "Enterprise CRM System (Full Suite)",
+        "AI Automation Workflow Integration",
+        "Data Analytics Dashboard",
+        "VPN & Network Security Configuration",
+        "Dedicated 24/7 Technical Support (24 Months)",
+        "Staff Training & Onboarding Program",
+    ],
+    "Custom Package": [],  # User defines sub-items manually
+}
+
+IGZ_PACKAGES = {
+    "": [],
+    "Financing Arrangement Package": [
+        "[A-001] Card Balance Alignment Package",
+        "[A-002] Credit Limit Optimisation Service",
+        "[A-003] Tax Working File Pack",
+        "[A-004] Payment Schedule Management",
+        "[A-005] Financial Record Documentation",
+    ],
+    "Record & Report Management Package": [
+        "[B-001] Monthly Statement Processing",
+        "[B-002] Transaction Record Management",
+        "[B-003] Document Verification Service",
+        "[B-004] Compliance Report Generation",
+        "[B-005] Financial Summary Preparation",
+    ],
+    "Digital Business Services Package": [
+        "[C-001] Business Registration Assistance",
+        "[C-002] Digital Business Profile Setup",
+        "[C-003] Document Preparation & Notarisation",
+        "[C-004] Compliance Advisory Service",
+        "[C-005] Corporate Secretarial Services",
+    ],
+    "Outcome Sharing & Settlement Package": [
+        "[D-001] Revenue Distribution Management",
+        "[D-002] Profit Sharing Documentation",
+        "[D-003] Performance Review & Reporting",
+        "[D-004] Settlement Processing Service",
+        "[D-005] Outcome Verification & Sign-off",
+    ],
+    "Bank Account Operations Package": [
+        "[E-001] Bank Account Activation Service",
+        "[E-002] Account Maintenance & Monitoring",
+        "[E-003] Fund Transfer Facilitation",
+        "[E-004] Transaction History Reconciliation",
+        "[E-005] Account Health Score Reporting",
+    ],
+    "Full Service Package": [
+        "[A-001] Card Balance Alignment Package",
+        "[B-001] Monthly Statement Processing",
+        "[C-001] Business Registration Assistance",
+        "[D-001] Revenue Distribution Management",
+        "[E-001] Bank Account Activation Service",
+        "[A-004] Payment Schedule Management",
+        "[B-004] Compliance Report Generation",
+    ],
+}
+
+def _packages(company: str) -> dict:
+    """Return the package dict for the given company."""
+    return AST_PACKAGES if "SMART" in company.upper() else IGZ_PACKAGES
+
+# ══════════════════════════════════════════════════════════════════════
 #  Excel column definitions
 # ══════════════════════════════════════════════════════════════════════
 
@@ -402,45 +498,127 @@ def parse_receipt(text: str, company: str) -> dict:
     d = {}
     def _s(patterns):
         for pat in patterns:
-            m = re.search(pat, text, re.IGNORECASE)
+            m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
             if m:
                 return m.group(1).strip()
         return ""
 
-    raw_inv = _s([r"invoice\s*no[\s.:]+([A-Z0-9_\-]+)",
-                  r"INV[-_]?\s*([0-9]{3,})"])
+    # ── Invoice No ────────────────────────────────────────────────
+    # Matches: INV NO 000962 / INV NO. 000962 / INVOICE NO 000962
+    raw_inv = _s([
+        r"inv(?:oice)?\s*no\.?\s*[:\s]+([A-Z0-9_\-]+)",
+        r"inv[-_]?no\.?\s*[:\s]+([A-Z0-9_\-]+)",
+        r"inv\s+no\s+([0-9]{3,})",
+    ])
     d["Invoice No"] = _clean_inv_no(raw_inv) if raw_inv else ""
 
-    d["Receipt No"] = _s([r"receipt\s*no[\s.:]+([0-9]+)"])
-    d["Date"]       = _s([r"date[\s.:]+(\\d{1,2}[\s/\-]\\w+[\s/\-]\\d{4})",
-                          r"(\d{1,2}\s+\w+\s+\d{4})"])
-    d["Due Date"]   = d["Date"]
-    d["Bill To"]    = _s([r"bill\s*to[\s.:]+([A-Za-z ]+?)(?:\n|company|payment)",
-                          r"issued\s*to[\s.:]+([A-Za-z ]+?)(?:\n|company)"])
-    d["Bill To"]    = re.sub(r"\s+", " ", d["Bill To"]).strip()
-    d["Payment Type"] = _s([r"payment[\s.:]+([A-Za-z ]+?)(?:\n|card|approval)",
-                             r"(visa|mastercard|cash|transfer|amex|e.?wallet)"])
-    d["Card Type"]  = _s([r"card\s*type[\s.:]+([A-Za-z ]+?)(?:\n|payment|card\s*no)",
-                          r"(visa\s*card|mastercard|credit|debit)"])
-    d["Card No"]    = _s([r"card\s*no[\s.:]+([0-9*X ]{10,})",
-                          r"(\d{4}[\s*]+\d{2,4}[\s*]+\*+[\s*]+\d{4})"])
-    d["Approval Code"] = _s([r"approval(?:\s*code)?[\s.:]+([A-Z0-9]+)"])
-    d["Ref No"]     = _s([r"ref(?:erence)?\s*no[\s.:]+([0-9A-Z]+)"])
+    # ── Receipt No / Trace No ─────────────────────────────────────
+    d["Receipt No"] = _s([
+        r"receipt\s*no\.?\s*[:\s]+([0-9A-Z\-]+)",
+        r"trace\s*no\.?\s*[:\s]+([0-9]+)",
+        r"trace[:\s]+([0-9]+)",
+    ])
 
-    total_s = _s([r"total\s*amount[\s.:]+RM\s*([\d,]+\.?\d*)",
-                  r"total[\s.:]+RM\s*([\d,]+\.?\d*)"])
+    # ── Date ──────────────────────────────────────────────────────
+    # Handles: 26MAR2026 / 26/03/2026 / 26-03-2026 / 26 MAR 2026
+    raw_date = _s([
+        r"date[/\\]?time[\s.:]+([0-9]{1,2}[A-Z]{3}[0-9]{4})",
+        r"date[\s.:]+([0-9]{1,2}[A-Z]{3}[0-9]{4})",
+        r"date[\s.:]+([0-9]{1,2}[\s/\-][0-9]{1,2}[\s/\-][0-9]{2,4})",
+        r"([0-9]{1,2}[A-Z]{3}[0-9]{4})",
+        r"([0-9]{2}/[0-9]{2}/[0-9]{4})",
+    ])
+    # Convert 26MAR2026 → 26/03/2026
+    if raw_date:
+        month_map = {"JAN":"01","FEB":"02","MAR":"03","APR":"04",
+                     "MAY":"05","JUN":"06","JUL":"07","AUG":"08",
+                     "SEP":"09","OCT":"10","NOV":"11","DEC":"12"}
+        m2 = re.match(r"([0-9]{1,2})([A-Z]{3})([0-9]{4})", raw_date.upper())
+        if m2:
+            dd, mon, yyyy = m2.group(1), m2.group(2), m2.group(3)
+            mm = month_map.get(mon, mon)
+            raw_date = f"{dd.zfill(2)}/{mm}/{yyyy}"
+    d["Date"] = raw_date or ""
+    d["Due Date"] = d["Date"]
+
+    # ── Time ──────────────────────────────────────────────────────
+    d["Time"] = _s([
+        r"date[/\\]?time\s+[0-9A-Z]+\s+([0-9]{1,2}:[0-9]{2}:[0-9]{2})",
+        r"time[\s.:]+([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)",
+        r"[0-9]{1,2}[A-Z]{3}[0-9]{4}\s+([0-9]{2}:[0-9]{2}:[0-9]{2})",
+    ])
+
+    # ── Bill To (merchant name on receipt = payee) ────────────────
+    d["Bill To"] = _s([
+        r"bill\s*to[\s.:]+([A-Za-z ]+?)(?:\n|company|payment)",
+        r"issued\s*to[\s.:]+([A-Za-z ]+?)(?:\n|company)",
+    ])
+    d["Bill To"] = re.sub(r"\s+", " ", d["Bill To"]).strip()
+
+    # ── Payment Type ─────────────────────────────────────────────
+    # Detect from VISA CREDIT / MASTERCARD CREDIT / CASH etc.
+    pay_raw = _s([
+        r"host\s+(visa|mastercard|master|amex|cash|transfer)",
+        r"(visa|mastercard|master|amex|cash|transfer|e[.-]?wallet)",
+    ])
+    pay_map = {"visa":"Visa","mastercard":"Master","master":"Master",
+               "amex":"Amex","cash":"Cash","transfer":"Transfer","e-wallet":"E-Wallet"}
+    d["Payment Type"] = pay_map.get((pay_raw or "").lower(), pay_raw or "")
+
+    # ── Card Type ────────────────────────────────────────────────
+    # Detect from: VISA CREDIT / VISA DEBIT / CREDIT CARD
+    card_raw = _s([
+        r"(?:visa|master(?:card)?)\s+(credit|debit)",
+        r"(credit|debit)\s+card",
+        r"card\s*type[\s.:]+([A-Za-z]+)",
+    ])
+    d["Card Type"] = (card_raw or "").upper() if card_raw else ""
+
+    # ── Card No ──────────────────────────────────────────────────
+    # Matches: 4617 72** **** 3964
+    d["Card No"] = _s([
+        r"([0-9]{4}\s+[0-9*]{2,4}\s+[*\s]+[0-9]{4})",
+        r"card\s*no\.?[\s.:]+([0-9*X\s]{10,})",
+        r"([0-9]{4}[*\s]+[0-9]{4})",
+    ])
+
+    # ── Approval Code ────────────────────────────────────────────
+    d["Approval Code"] = _s([
+        r"approval\s*code[\s.:]+([A-Z0-9]+)",
+        r"approval[\s.:]+([A-Z0-9]+)",
+    ])
+
+    # ── Ref No ───────────────────────────────────────────────────
+    d["Ref No"] = _s([
+        r"ref(?:erence)?\s*no\.?[\s.:]+([0-9A-Z]+)",
+        r"ref\s+no\s+([0-9]+)",
+    ])
+
+    # ── Total ────────────────────────────────────────────────────
+    total_s = _s([
+        r"total\s+rm\s*([\d,]+\.?\d*)",
+        r"total[\s.:]+rm\s*([\d,]+\.?\d*)",
+        r"rm\s*([\d,]+\.\d{2})\s*$",
+        r"amount[\s.:]+rm\s*([\d,]+\.?\d*)",
+    ])
     d["Total (RM)"] = float(total_s.replace(",","")) if total_s else ""
 
-    sub_s = _s([r"subtotal[\s.:]+RM\s*([\d,]+\.?\d*)"])
+    # ── Subtotal ─────────────────────────────────────────────────
+    sub_s = _s([r"subtotal[\s.:]+rm\s*([\d,]+\.?\d*)"])
     d["Subtotal (RM)"] = float(sub_s.replace(",","")) if sub_s else d.get("Total (RM)","")
 
-    promo_s = _s([r"promo\s*rebate[\s.:(]+RM\s*([\d,]+\.?\d*)",
-                  r"discount[\s.:(]+RM\s*([\d,]+\.?\d*)"])
+    # ── Promo / Discount ─────────────────────────────────────────
+    promo_s = _s([
+        r"promo\s*rebate[\s.:(]+rm\s*([\d,]+\.?\d*)",
+        r"discount[\s.:(]+rm\s*([\d,]+\.?\d*)",
+    ])
     d["Promo Rebate (RM)"] = f"-{promo_s}" if promo_s else ""
+
+    # ── Tax / Remarks ─────────────────────────────────────────────
     d["Tax"]     = _s([r"tax[\s.:]+([^\n]+)"]) or "-"
     d["Remarks"] = _s([r"remarks?[\s.:]+([^\n]+)"]) or ""
 
-    # Product item defaults
+    # ── Product item defaults ─────────────────────────────────────
     d["Product Item"]      = ""
     d["Qty"]               = 1
     d["Unit Price (RM)"]   = d.get("Total (RM)", "")
@@ -708,58 +886,78 @@ def main():
                                                     str(d.get("Promo Rebate (RM)","")))
             d["Total (RM)"]    = st.text_input("Total (RM)",    str(d.get("Total (RM)","")))
 
-        # ── Product Item section (BOTH companies now use 4 columns) ──
+        # ── Package Section (Combination 2: Predefined + Auto Sub-items) ──────
         st.markdown("---")
         label_color = "#6B5B95" if is_ast else "#1A1A1A"
-        co_label    = "AI 服务项目" if is_ast else "IGZ 交易类型"
+        co_label    = "AI 服务套餐" if is_ast else "IGZ 服务套餐"
         st.markdown(
-            f"<div class='section-title' style='color:{label_color}'>🛒 {co_label}</div>",
+            f"<div class='section-title' style='color:{label_color}'>🎁 {co_label}</div>",
             unsafe_allow_html=True)
 
-        products    = _products(company)
-        prod_labels = [""] + [label for label, _ in products]
-        cur_prod    = d.get("Product Item","")
-        idx_prod    = prod_labels.index(cur_prod) if cur_prod in prod_labels else 0
+        packages     = _packages(company)
+        pkg_names    = list(packages.keys())
+        cur_pkg      = st.session_state.get("selected_package", "")
+        idx_pkg      = pkg_names.index(cur_pkg) if cur_pkg in pkg_names else 0
 
-        help_text = ("选择服务后自动带入 2026 参考单价" if is_ast
-                     else "选择 IGZ 交易类型（来源：IGZ Transaction Reference v1.0）")
-        selected_prod = st.selectbox(
-            f"Product Item（{co_label}）",
-            prod_labels,
-            index=idx_prod,
-            help=help_text)
+        selected_pkg = st.selectbox(
+            f"选择套餐（{co_label}）",
+            pkg_names,
+            index=idx_pkg,
+            help="选择套餐后自动带出包含项目，总价 = 收据金额，子项目价格显示 RM 0.00")
+        st.session_state["selected_package"] = selected_pkg
 
-        auto_price = ""
-        if selected_prod:
-            for lbl, price in products:
-                if lbl == selected_prod:
-                    auto_price = str(price) if price > 0 else ""
-                    break
-
-        d["Product Item"] = selected_prod
-
-        pc1, pc2, pc3 = st.columns([3, 1, 1])
-        with pc1:
-            st.text_input("已选项目", selected_prod, disabled=True)
-        with pc2:
-            d["Qty"] = st.number_input("Qty", min_value=1, max_value=999,
-                                       value=int(d.get("Qty",1) or 1))
-        with pc3:
-            d["Unit Price (RM)"] = st.text_input(
-                "Unit Price (RM)",
-                value=d.get("Unit Price (RM)","") or auto_price,
-                help="选择后自动带入参考价，可手动修改")
-
-        # Auto-calc line total
+        # Receipt total (locked from OCR)
+        receipt_total = 0.0
         try:
-            line_total = float(str(d["Unit Price (RM)"]).replace(",","")) * int(d["Qty"])
-            d["Total Amount (RM)"] = f"{line_total:.2f}"
+            receipt_total = float(str(d.get("Total (RM)", 0)).replace(",", ""))
         except:
-            d["Total Amount (RM)"] = d.get("Total Amount (RM)","")
+            pass
 
-        st.markdown(f"**Line Total : RM {d['Total Amount (RM)']}**")
+        sub_items = packages.get(selected_pkg, []) if selected_pkg else []
 
-        d["Remarks"] = st.text_area("Remarks", d.get("Remarks",""), height=60)
+        if selected_pkg:
+            # ── Package header line ────────────────────────────────────
+            st.markdown(f"""
+            <div style='background:#1e1e2e;border-radius:10px;padding:14px 18px;
+                        border-left:4px solid {label_color};margin:10px 0'>
+                <div style='color:#aaa;font-size:11px;margin-bottom:4px'>📦 PACKAGE</div>
+                <div style='color:#fff;font-size:15px;font-weight:700'>{selected_pkg}</div>
+                <div style='color:{label_color};font-size:18px;font-weight:800;margin-top:6px'>
+                    RM {receipt_total:,.2f}
+                    <span style='color:#666;font-size:12px;margin-left:8px'>= 收据金额 ✅</span>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            # ── Sub-items display (RM 0.00 each) ────────────────────────
+            if sub_items:
+                st.markdown("**包含项目 (Including):**")
+                for item in sub_items:
+                    clean = re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", item)
+                    st.markdown(
+                        f"<div style='padding:5px 12px;margin:2px 0;border-radius:6px;"
+                        f"background:#0d0d1a;color:#888;font-size:13px'>"
+                        f"↳ {clean} &nbsp;&nbsp;"
+                        f"<span style='color:#444'>RM 0.00</span></div>",
+                        unsafe_allow_html=True)
+            else:
+                st.info("ℹ️ Custom Package — 子项目将由您手动填写在 Remarks 栏")
+
+            # Set invoice items for PDF
+            d["Product Item"]      = selected_pkg
+            d["Qty"]               = 1
+            d["Unit Price (RM)"]   = f"{receipt_total:.2f}"
+            d["Total Amount (RM)"] = f"{receipt_total:.2f}"
+
+            # Store sub-items in session for PDF
+            st.session_state["pkg_sub_items"] = sub_items
+
+        else:
+            st.session_state["pkg_sub_items"] = []
+            d["Product Item"] = ""
+            d["Unit Price (RM)"] = ""
+            d["Total Amount (RM)"] = ""
+
+        d["Remarks"] = st.text_area("Remarks", d.get("Remarks", ""), height=60)
         st.session_state.parsed_data = d
 
         # ── STEP 3: Generate Invoice ──────────────────────────────
@@ -773,13 +971,28 @@ def main():
                 with st.spinner("⚙️ 正在生成 Invoice PDF…"):
                     try:
                         inv_no = d.get("Invoice No") or datetime.datetime.now().strftime("%Y%m%d%H%M")
+                        receipt_total = float(str(d.get("Total (RM)","0")).replace(",",""))
+                        pkg_name  = d.get("Product Item", "Services Rendered") or "Services Rendered"
+                        sub_items = st.session_state.get("pkg_sub_items", [])
+
+                        # Main package line
                         items_list = [{
-                            "desc": re.sub(r"^\[[A-Z]-\d{3}\]\s*","",
-                                           d.get("Product Item","Services rendered") or "Services rendered"),
-                            "unit_price": float(str(d.get("Unit Price (RM)","0")).replace(",","")),
-                            "qty":        int(d.get("Qty",1)),
-                            "amount":     float(str(d.get("Total Amount (RM)","0")).replace(",","")),
+                            "desc":       pkg_name,
+                            "unit_price": receipt_total,
+                            "qty":        1,
+                            "amount":     receipt_total,
+                            "is_package": True,
                         }]
+                        # Sub-items at RM 0.00
+                        for si in sub_items:
+                            clean_si = re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", si)
+                            items_list.append({
+                                "desc":       f"↳ {clean_si}",
+                                "unit_price": 0.0,
+                                "qty":        1,
+                                "amount":     0.0,
+                                "is_subitem": True,
+                            })
 
                         pdf_p    = generate_invoice_pdf(company, d, inv_no, items_list)
                         inv_link = str(pdf_p)

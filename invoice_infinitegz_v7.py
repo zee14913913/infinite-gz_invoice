@@ -256,29 +256,45 @@ def draw_igz_invoice(c, inv):
     subtotal = 0
     items = inv.get("items", [])
     for item in items:
-        desc_lines = _wrap_text(item["desc"], "IGZ_Reg", 8, DESC_W)
-        row_h = max(7 * mm, len(desc_lines) * ROW_LINE_H + 3 * mm)
+        is_sub = item.get("is_subitem", False)
+        is_pkg = item.get("is_package", False)
+
+        desc_lines = _wrap_text(item["desc"], "IGZ_Reg", 8 if not is_sub else 7, DESC_W)
+        row_h = max(6 * mm, len(desc_lines) * ROW_LINE_H + 3 * mm)
 
         ty = y - 2 * mm
-        c.setFont("IGZ_Reg", 8)
-        c.setFillColor(DARK)
-        for li, dl in enumerate(desc_lines):
-            c.drawString(C_DESC, ty - li * ROW_LINE_H, dl)
 
-        # ── [FIX-A] Unit Price: integer display (100)
-        if item.get("unit_price") is not None:
-            c.drawRightString(C_UP_R, ty, _fmt_unit(item["unit_price"]))
+        if is_sub:
+            # Sub-item: smaller grey italic text, no price columns shown
+            c.setFont("IGZ_Reg", 7)
+            c.setFillColorRGB(0.55, 0.55, 0.55)  # grey
+            for li, dl in enumerate(desc_lines):
+                c.drawString(C_DESC + 4 * mm, ty - li * ROW_LINE_H, dl)
+            c.setFillColorRGB(0.45, 0.45, 0.45)
+            c.drawRightString(C_UP_R,  ty, "0.00")
+            c.drawCentredString(C_QTY_C, ty, "1")
+            c.drawRightString(C_TOT_R, ty, "0.00")
+        else:
+            # Normal / Package item
+            c.setFont("IGZ_Bold" if is_pkg else "IGZ_Reg", 8)
+            c.setFillColor(DARK)
+            for li, dl in enumerate(desc_lines):
+                c.drawString(C_DESC, ty - li * ROW_LINE_H, dl)
 
-        if item.get("qty") is not None:
-            c.drawCentredString(C_QTY_C, ty, str(item["qty"]))
+            if item.get("unit_price") is not None:
+                c.setFont("IGZ_Reg", 8)
+                c.setFillColor(DARK)
+                c.drawRightString(C_UP_R, ty, _fmt_unit(item["unit_price"]))
 
-        # ── [FIX-A] Total column: always 2 dp (100.00)
-        if item.get("amount") is not None:
-            c.drawRightString(C_TOT_R, ty, _fmt_amount(item["amount"]))
-            subtotal += item["amount"]
+            if item.get("qty") is not None:
+                c.drawCentredString(C_QTY_C, ty, str(item["qty"]))
+
+            if item.get("amount") is not None:
+                c.drawRightString(C_TOT_R, ty, _fmt_amount(item["amount"]))
+                subtotal += item["amount"]
 
         y -= row_h
-        # No row separator lines (FIX-2 from v4 kept)
+        # No row separator lines
 
     y -= 3 * mm
 

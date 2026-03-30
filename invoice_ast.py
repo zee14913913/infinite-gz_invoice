@@ -220,30 +220,44 @@ def draw_ast_invoice(c, inv):
     items = inv.get("items", [])
 
     for idx, item in enumerate(items, start=1):
-        desc_lines = _wrap(item["desc"], "AST_Reg", 8, DESC_W)
+        is_sub = item.get("is_subitem", False)
+        is_pkg = item.get("is_package", False)
+
+        desc_lines = _wrap(item["desc"], "AST_Reg", 8 if not is_sub else 7, DESC_W)
         row_h = max(5.5 * mm, len(desc_lines) * ROW_LINE_H + 2 * mm)
 
-        # Alternating very-light background
-        if idx % 2 == 0:
+        # Alternating background (skip for sub-items)
+        if not is_sub and idx % 2 == 0:
             c.setFillColor(XLGRAY)
             c.rect(ML, y - row_h, TW, row_h, fill=1, stroke=0)
 
         ty = y - 2.5 * mm
-        c.setFont("AST_Reg", 8)
-        c.setFillColor(DARK)
 
-        c.drawString(C_NO, ty, str(idx))
-
-        for li, dl in enumerate(desc_lines):
-            c.drawString(C_DESC, ty - li * ROW_LINE_H, dl)
-
-        if item.get("unit_price") is not None:
-            c.drawRightString(C_UP_R, ty, _fmt_unit(item["unit_price"]))
-        if item.get("qty") is not None:
-            c.drawCentredString(C_QTY_C, ty, str(item["qty"]))
-        if item.get("amount") is not None:
-            c.drawRightString(C_AMT_R, ty, _fmt_amount(item["amount"]))
-            subtotal += item["amount"]
+        if is_sub:
+            # Sub-item: grey small text, indented, price = 0.00
+            c.setFont("AST_Reg", 7)
+            c.setFillColorRGB(0.55, 0.55, 0.55)
+            c.drawString(C_NO, ty, "")
+            for li, dl in enumerate(desc_lines):
+                c.drawString(C_DESC + 3 * mm, ty - li * ROW_LINE_H, dl)
+            c.setFillColorRGB(0.5, 0.5, 0.5)
+            c.drawRightString(C_UP_R,   ty, "0.00")
+            c.drawCentredString(C_QTY_C, ty, "1")
+            c.drawRightString(C_AMT_R,  ty, "0.00")
+        else:
+            c.setFont("AST_Bold" if is_pkg else "AST_Reg", 8)
+            c.setFillColor(DARK)
+            c.drawString(C_NO, ty, str(idx))
+            for li, dl in enumerate(desc_lines):
+                c.drawString(C_DESC, ty - li * ROW_LINE_H, dl)
+            if item.get("unit_price") is not None:
+                c.setFont("AST_Reg", 8)
+                c.drawRightString(C_UP_R, ty, _fmt_unit(item["unit_price"]))
+            if item.get("qty") is not None:
+                c.drawCentredString(C_QTY_C, ty, str(item["qty"]))
+            if item.get("amount") is not None:
+                c.drawRightString(C_AMT_R, ty, _fmt_amount(item["amount"]))
+                subtotal += item["amount"]
 
         y -= row_h
 
