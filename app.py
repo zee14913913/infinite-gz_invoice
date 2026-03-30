@@ -242,8 +242,8 @@ IGZ_PACKAGES = {
 }
 
 def _packages(company: str) -> dict:
-    """Return the package dict for the given company."""
-    return AST_PACKAGES if "SMART" in company.upper() else IGZ_PACKAGES
+    """Return the package dict for the given company (uses same logic as _is_ast)."""
+    return AST_PACKAGES if _is_ast(company) else IGZ_PACKAGES
 
 # ══════════════════════════════════════════════════════════════════════
 #  Excel column definitions
@@ -307,7 +307,9 @@ def get_cols(company: str):
     return AST_COLS if _is_ast(company) else IGZ_COLS
 
 def _is_ast(company: str) -> bool:
-    return "AI SMART" in company or "AST" in company
+    """Exact-match check — avoids false positives like 'ASTRO'."""
+    c = company.upper()
+    return "AI SMART" in c or c == "AST" or c.startswith("AI SMART TECH")
 
 def _products(company: str):
     return AST_PRODUCTS if _is_ast(company) else IGZ_PRODUCTS
@@ -320,11 +322,26 @@ def _thin():
     return Border(left=s, right=s, top=s, bottom=s)
 
 def init_excel(path: Path, company: str):
-    if path.exists():
-        wb = openpyxl.load_workbook(path)
-    else:
+    """Load or create the Excel workbook, robust against corrupt/empty files."""
+    import zipfile
+    _need_create = True
+    if path.exists() and path.stat().st_size > 100:
+        try:
+            wb = openpyxl.load_workbook(path)
+            _need_create = False
+        except (zipfile.BadZipFile, Exception):
+            # Corrupt or empty file – wipe and recreate
+            path.unlink(missing_ok=True)
+    if _need_create:
         wb = openpyxl.Workbook()
         wb.active.title = "Invoices"
+    # Ensure 'Invoices' sheet exists
+    if "Invoices" not in wb.sheetnames:
+        ws = wb.create_sheet("Invoices", 0)
+        # Remove default 'Sheet' if present
+        for sname in ["Sheet", "Sheet1"]:
+            if sname in wb.sheetnames:
+                del wb[sname]
     ws = wb["Invoices"]
     if ws.max_row == 0 or (ws.max_row == 1 and ws.cell(1,1).value is None):
         _write_header(ws, company)
@@ -506,6 +523,8 @@ def parse_receipt(text: str, company: str) -> dict:
     # ── Invoice No ────────────────────────────────────────────────
     # Matches: INV NO 000962 / INV NO. 000962 / INVOICE NO 000962
     raw_inv = _s([
+        r"invoice\s*no\.?\s*[:\s]+([0-9A-Z\-_]+)",
+        r"[il]nvoice\s*no\.?\s*[:\s]+([0-9]+)",
         r"inv(?:oice)?\s*no\.?\s*[:\s]+([A-Z0-9_\-]+)",
         r"inv[-_]?no\.?\s*[:\s]+([A-Z0-9_\-]+)",
         r"inv\s+no\s+([0-9]{3,})",
@@ -513,9 +532,13 @@ def parse_receipt(text: str, company: str) -> dict:
     d["Invoice No"] = _clean_inv_no(raw_inv) if raw_inv else ""
 
     # ── Receipt No / Trace No ─────────────────────────────────────
+    # Pattern order: multiline "RECEIPT NO : TRACE NO\n001685" first,
+    # then digits-only match (avoids capturing "TRACE" as the number)
     d["Receipt No"] = _s([
-        r"receipt\s*no\.?\s*[:\s]+([0-9A-Z\-]+)",
+        r"receipt\s*no\.?\s*:\s*trace\s*no\s*[\n\r]+\s*([0-9]+)",  # multiline
+        r"receipt\s*no\.?\s*[:\s]+([0-9]{3,})",                     # digits-only ≥3
         r"trace\s*no\.?\s*[:\s]+([0-9]+)",
+        r"trace\s*no\s*[:\s]+([0-9]+)",
         r"trace[:\s]+([0-9]+)",
     ])
 
@@ -559,11 +582,14 @@ def parse_receipt(text: str, company: str) -> dict:
     # Detect from VISA CREDIT / MASTERCARD CREDIT / CASH etc.
     pay_raw = _s([
         r"host\s+(visa|mastercard|master|amex|cash|transfer)",
-        r"(visa|mastercard|master|amex|cash|transfer|e[.-]?wallet)",
+        r"(visa|mastercard|master|amex|cash|transfer|e[.\-]?wallet)",
     ])
     pay_map = {"visa":"Visa","mastercard":"Master","master":"Master",
-               "amex":"Amex","cash":"Cash","transfer":"Transfer","e-wallet":"E-Wallet"}
-    d["Payment Type"] = pay_map.get((pay_raw or "").lower(), pay_raw or "")
+               "amex":"Amex","cash":"Cash","transfer":"Transfer","e-wallet":"E-Wallet",
+               "ewallet":"E-Wallet","e.wallet":"E-Wallet"}  # all e-wallet variants
+    # Normalise e-wallet variants before lookup
+    _pay_key = re.sub(r"e[.\-]?wallet", "e-wallet", (pay_raw or "").lower())
+    d["Payment Type"] = pay_map.get(_pay_key, pay_raw or "")
 
     # ── Card Type ────────────────────────────────────────────────
     # Detect from: VISA CREDIT / VISA DEBIT / CREDIT CARD
@@ -577,29 +603,32 @@ def parse_receipt(text: str, company: str) -> dict:
     # ── Card No ──────────────────────────────────────────────────
     # Matches: 4617 72** **** 3964
     d["Card No"] = _s([
-        r"([0-9]{4}\s+[0-9*]{2,4}\s+[*\s]+[0-9]{4})",
+        r"card\s*no\.?[\s.:]+([0-9]{4}\s+[0-9*]{2,6}\s+[*]{2,}\s+[0-9]{4})",
+        r"([0-9]{4}\s+[0-9*]{2,6}\s+[*]{2,}\s+[0-9]{4})",
         r"card\s*no\.?[\s.:]+([0-9*X\s]{10,})",
-        r"([0-9]{4}[*\s]+[0-9]{4})",
     ])
 
     # ── Approval Code ────────────────────────────────────────────
     d["Approval Code"] = _s([
+        r"approval\s*code\s*[:\s]+([A-Z0-9]+)",
         r"approval\s*code[\s.:]+([A-Z0-9]+)",
         r"approval[\s.:]+([A-Z0-9]+)",
     ])
 
     # ── Ref No ───────────────────────────────────────────────────
     d["Ref No"] = _s([
+        r"ref\s*no\.?\s*[:\s]+([0-9A-Z]+)",
         r"ref(?:erence)?\s*no\.?[\s.:]+([0-9A-Z]+)",
         r"ref\s+no\s+([0-9]+)",
     ])
 
     # ── Total ────────────────────────────────────────────────────
+    # Note: fallback r"rm\s*(...)$" removed — too greedy in multiline mode
     total_s = _s([
         r"total\s+rm\s*([\d,]+\.?\d*)",
         r"total[\s.:]+rm\s*([\d,]+\.?\d*)",
-        r"rm\s*([\d,]+\.\d{2})\s*$",
         r"amount[\s.:]+rm\s*([\d,]+\.?\d*)",
+        r"(?:grand\s*)?total[:\s]+([\d,]+\.\d{2})",
     ])
     d["Total (RM)"] = float(total_s.replace(",","")) if total_s else ""
 
@@ -615,7 +644,11 @@ def parse_receipt(text: str, company: str) -> dict:
     d["Promo Rebate (RM)"] = f"-{promo_s}" if promo_s else ""
 
     # ── Tax / Remarks ─────────────────────────────────────────────
-    d["Tax"]     = _s([r"tax[\s.:]+([^\n]+)"]) or "-"
+    # Restrict tax to numeric values only (avoids capturing "TAX INVOICE 2026-001")
+    d["Tax"]     = _s([r"tax[\s.:]+([\d][\d\.\-]*\s*%?)",
+                       r"service\s*tax[\s.:]+([\d][\d\.\-]*)",
+                       r"gst[\s.:]+([\d][\d\.\-]*)",
+                       ]) or "-"
     d["Remarks"] = _s([r"remarks?[\s.:]+([^\n]+)"]) or ""
 
     # ── Product item defaults ─────────────────────────────────────
@@ -623,6 +656,7 @@ def parse_receipt(text: str, company: str) -> dict:
     d["Qty"]               = 1
     d["Unit Price (RM)"]   = d.get("Total (RM)", "")
     d["Total Amount (RM)"] = d.get("Total (RM)", "")
+    d["Company"]           = ""   # always initialise; user fills in Step 2
 
     return d
 
@@ -667,11 +701,15 @@ def generate_invoice_pdf(company: str, data: dict, inv_number: str,
     }
     promo = data.get("Promo Rebate (RM)","")
     if promo:
-        try: inv["promo_rebate"] = float(str(promo).replace(",",""))
+        try:
+            # Always store promo as NEGATIVE (deduction)
+            _pv = abs(float(str(promo).replace(",","").lstrip("-")))
+            inv["promo_rebate"] = -_pv
         except: pass
 
     ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_no  = re.sub(r"[^A-Za-z0-9_\-]","_", inv_no_clean)
+    safe_no  = safe_no or ts   # fallback if inv_no_clean is empty
     pdf_path = INVOICES_DIR / f"invoice_{safe_no}_{ts}.pdf"
 
     if _is_ast(company):
@@ -804,6 +842,9 @@ def main():
                   "invoice_done","invoice_path","items_list"]:
             st.session_state[k] = {} if k in ("parsed_data",) else ([] if k=="items_list" else None)
         st.session_state.invoice_done = False
+        # Also reset package selection
+        st.session_state["selected_package"] = ""
+        st.session_state["pkg_sub_items"] = []
         st.rerun()
 
     excel_path = AST_EXCEL if is_ast else IGZ_EXCEL
@@ -821,16 +862,20 @@ def main():
         with open(rec_path,"wb") as f: f.write(uploaded.read())
         st.session_state.receipt_path = str(rec_path)
 
-        with st.spinner("🔍 正在 OCR 解析收据…"):
-            img    = Image.open(rec_path)
-            raw    = ocr_image(img)
-            parsed = parse_receipt(raw, company)
-            parsed["Receipt Link"] = str(rec_path)
-            st.session_state.parsed_data = parsed
-            row_num = append_row(wb, ws, parsed, excel_path, company)
-            st.session_state.excel_row = row_num
-        st.success(f"✅ 收据已解析，已写入 Excel 第 {row_num} 行")
-        st.rerun()
+        try:
+            with st.spinner("🔍 正在 OCR 解析收据…"):
+                img    = Image.open(rec_path)
+                raw    = ocr_image(img)
+                parsed = parse_receipt(raw, company)
+                parsed["Receipt Link"] = str(rec_path)
+                st.session_state.parsed_data = parsed
+                row_num = append_row(wb, ws, parsed, excel_path, company)
+                st.session_state.excel_row = row_num
+            st.success(f"✅ 收据已解析，已写入 Excel 第 {row_num} 行")
+            st.rerun()
+        except Exception as _ocr_err:
+            st.error(f"❌ OCR 解析失败: {_ocr_err}")
+            st.session_state.receipt_path = None  # allow re-upload
 
     if st.session_state.receipt_path:
         with st.expander("📎 已上传的收据", expanded=False):
@@ -842,8 +887,7 @@ def main():
         st.markdown("---")
         st.markdown("<div class='section-title'>✏️ Step 2 · 确认 / 编辑内容</div>",
                     unsafe_allow_html=True)
-        st.info("📌 系统已自动解析收据。**唯一需手动填写**的是「Company 客户公司名称」。"
-                "下拉菜单字段直接选择即可。")
+        st.info("📌 系统已自动解析收据。**需手动填写**的是：\n① 「Bill To」= 客户姓名/持卡人 \n② 「Company」= 客户公司名称（无则填 -）\n下拉菜单字段直接选择即可。")
 
         d = st.session_state.parsed_data
         c1, c2 = st.columns(2)
@@ -856,7 +900,7 @@ def main():
                 help="系统自动去除 INV- 前缀，保留收据原始编号")
             d["Date"]        = st.text_input("Date", d.get("Date",""))
             d["Due Date"]    = st.text_input("Due Date", d.get("Due Date",""))
-            d["Bill To"]     = st.text_input("Bill To (客户姓名)", d.get("Bill To",""))
+            d["Bill To"]     = st.text_input("Bill To (持卡人/客户姓名 — 手动填写)", d.get("Bill To",""))
             d["Company"]     = st.text_input(
                 "⭐ Company (手动填写，无则填 -)",
                 d.get("Company",""),
@@ -884,6 +928,19 @@ def main():
             d["Subtotal (RM)"] = st.text_input("Subtotal (RM)", str(d.get("Subtotal (RM)","")))
             d["Promo Rebate (RM)"] = st.text_input("Promo Rebate (RM)",
                                                     str(d.get("Promo Rebate (RM)","")))
+            # ── Discount guard: warn if promo rebate > 15% of subtotal ──
+            try:
+                _sub_val   = float(str(d.get("Subtotal (RM)","0")).replace(",",""))
+                _promo_raw = str(d.get("Promo Rebate (RM)","")).lstrip("-").replace(",","")
+                _promo_val = float(_promo_raw) if _promo_raw else 0.0
+                if _sub_val > 0 and _promo_val > 0:
+                    _disc_pct = (_promo_val / _sub_val) * 100
+                    if _disc_pct > 15:
+                        st.warning(f"⚠️ 折扣率 {_disc_pct:.1f}% 超过 15%，请确认是否正确")
+                    else:
+                        st.success(f"✅ 折扣率 {_disc_pct:.1f}%（≤ 15%，正常范围）")
+            except:
+                pass
             d["Total (RM)"]    = st.text_input("Total (RM)",    str(d.get("Total (RM)","")))
 
         # ── Package Section (Combination 2: Predefined + Auto Sub-items) ──────
@@ -1033,6 +1090,9 @@ def main():
                           "invoice_done","invoice_path","items_list"]:
                     st.session_state[k] = {} if k=="parsed_data" else ([] if k=="items_list" else None)
                 st.session_state.invoice_done = False
+                # Reset package selection for new receipt
+                st.session_state["selected_package"] = ""
+                st.session_state["pkg_sub_items"] = []
                 st.rerun()
 
     # ── STEP 4: Excel summary table ───────────────────────────────
@@ -1068,7 +1128,8 @@ def main():
             w = COL_W.get(col, 120)
             if col in ("Receipt Link","Invoice Link"):
                 col_cfg[col] = st.column_config.LinkColumn(col, width=w, display_text="🔗 查看")
-            elif col in ("Subtotal (RM)","Unit Price (RM)","Total Amount (RM)","Total (RM)"):
+            elif col in ("Subtotal (RM)","Unit Price (RM)","Total Amount (RM)","Total (RM)",
+                         "Promo Rebate (RM)"):
                 col_cfg[col] = st.column_config.NumberColumn(col, width=w, format="RM %.2f")
             elif col == "Qty":
                 col_cfg[col] = st.column_config.NumberColumn(col, width=w, format="%d")

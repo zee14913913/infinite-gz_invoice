@@ -24,7 +24,19 @@ from reportlab.pdfbase.ttfonts import TTFont
 import os
 
 # ── Fonts ─────────────────────────────────────────────────────────────
-FONT_DIR = "/usr/share/fonts/truetype/liberation/"
+# ── Font directory (with cross-platform fallback) ─────────────────────────
+for _d in [
+    "/usr/share/fonts/truetype/liberation/",       # Linux (Debian/Ubuntu)
+    "/usr/share/fonts/liberation/",                # Linux (RHEL/Fedora)
+    "/Library/Fonts/",                             # macOS
+    "C:/Windows/Fonts/",                           # Windows
+    os.path.dirname(os.path.abspath(__file__)),    # same directory as script
+]:
+    if os.path.exists(_d):
+        FONT_DIR = _d
+        break
+else:
+    FONT_DIR = "/usr/share/fonts/truetype/liberation/"  # final fallback
 pdfmetrics.registerFont(TTFont("AST_Reg",    FONT_DIR + "LiberationSans-Regular.ttf"))
 pdfmetrics.registerFont(TTFont("AST_Bold",   FONT_DIR + "LiberationSans-Bold.ttf"))
 pdfmetrics.registerFont(TTFont("AST_Serif",  FONT_DIR + "LiberationSerif-Regular.ttf"))
@@ -153,10 +165,12 @@ def draw_ast_invoice(c, inv):
         ("Bill To :",      str(inv.get("bill_to", ""))),
         ("Company :",      str(inv.get("company", "–"))),
         ("Payment :",      str(inv.get("payment_type", ""))),
+        ("Card Type :",    str(inv.get("card_type", ""))),
         ("Approval :",     str(inv.get("approval", ""))),
     ]
     right_fields = [
         ("Date :",         str(inv.get("date", ""))),
+        ("Due Date :",     str(inv.get("due_date", inv.get("date", "")))),
         ("Receipt No :",   str(inv.get("receipt_no", ""))),
         ("Card No :",      str(inv.get("card_no", ""))),
         ("Ref No :",       str(inv.get("ref_no", ""))),
@@ -306,9 +320,14 @@ def draw_ast_invoice(c, inv):
     y -= 3 * mm
 
     # TOTAL AMOUNT — full-width dark bar
-    total = inv.get("total", subtotal)
-    if promo is not None:
-        total = subtotal + promo  # promo is negative
+    # Always trust inv["total"] (the receipt amount) as the source of truth.
+    # Only fall back to subtotal+promo calculation when total is not provided.
+    if inv.get("total") is not None:
+        total = float(str(inv["total"]).replace(",",""))
+    elif promo is not None:
+        total = subtotal - abs(promo)   # promo always treated as deduction
+    else:
+        total = subtotal
     TOTAL_H = 10 * mm
     c.setFillColor(DARK)
     c.rect(ML, y - TOTAL_H, TW, TOTAL_H, fill=1, stroke=0)
@@ -384,11 +403,16 @@ def draw_ast_invoice(c, inv):
     c.line(REM_X, rem_y + 1*mm, REM_X + REM_W, rem_y + 1*mm)
     rem_y -= 3.5 * mm
 
-    remarks = inv.get("remarks", [
+    _raw_remarks = inv.get("remarks", [
         f"Date / Time : {inv.get('date', '')}",
         "2-Year enterprise support from invoice date.",
         "Hardware under 1-Year Huawei warranty.",
     ])
+    # Defensive: handle both list and plain string
+    if isinstance(_raw_remarks, str):
+        remarks = [_raw_remarks] if _raw_remarks else []
+    else:
+        remarks = list(_raw_remarks)
     for rline in remarks:
         c.setFont("AST_Reg", 7.5)
         c.setFillColor(DARK)

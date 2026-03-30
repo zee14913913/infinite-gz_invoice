@@ -19,7 +19,19 @@ from reportlab.pdfbase.ttfonts import TTFont
 import os
 
 # ── Fonts ────────────────────────────────────────────────────────────
-FONT_DIR = "/usr/share/fonts/truetype/liberation/"
+# ── Font directory (with cross-platform fallback) ─────────────────────────
+for _d in [
+    "/usr/share/fonts/truetype/liberation/",       # Linux (Debian/Ubuntu)
+    "/usr/share/fonts/liberation/",                # Linux (RHEL/Fedora)
+    "/Library/Fonts/",                             # macOS
+    "C:/Windows/Fonts/",                           # Windows
+    os.path.dirname(os.path.abspath(__file__)),    # same directory as script
+]:
+    if os.path.exists(_d):
+        FONT_DIR = _d
+        break
+else:
+    FONT_DIR = "/usr/share/fonts/truetype/liberation/"  # final fallback
 pdfmetrics.registerFont(TTFont("IGZ_Reg",    FONT_DIR + "LiberationSans-Regular.ttf"))
 pdfmetrics.registerFont(TTFont("IGZ_Bold",   FONT_DIR + "LiberationSans-Bold.ttf"))
 pdfmetrics.registerFont(TTFont("IGZ_Serif",  FONT_DIR + "LiberationSerif-Regular.ttf"))
@@ -176,12 +188,14 @@ def draw_igz_invoice(c, inv):
         ("APPROVAL",   inv.get("approval", "–")),
         ("RECEIPT NO", inv.get("receipt_no", "–")),
         ("REF NO",     inv.get("ref_no", "–")),
+        ("CARD TYPE",  inv.get("card_type", "–")),
     ]
     field_right = [
         ("DATE",         inv.get("date", "–")),
         ("DUE DATE",     inv.get("due_date", inv.get("date", "–"))),
         ("PAYMENT TYPE", inv.get("payment_type", "–")),
         ("CARD NO",      inv.get("card_no", "–")),
+        ("REMARKS",      (inv["remarks"][0] if isinstance(inv["remarks"], list) else str(inv["remarks"])) if inv.get("remarks") else "–"),
     ]
 
     fy = y
@@ -323,7 +337,7 @@ def draw_igz_invoice(c, inv):
     c.setFillColor(DARK)                    # DARK same as SUBTOTAL label
     c.drawString(SUBTOT_LABEL_X, y, "TAX :")
     c.setFillColor(DARK)
-    c.drawRightString(MR, y, inv.get("tax", "-"))
+    c.drawRightString(MR, y, str(inv.get("tax", "-") or "-"))
     y -= 7 * mm
 
     # ════════════════════════════════════════════════════════════════
