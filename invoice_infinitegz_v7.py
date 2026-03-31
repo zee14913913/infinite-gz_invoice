@@ -188,12 +188,12 @@ def draw_igz_invoice(c, inv):
         ("APPROVAL",   inv.get("approval", "–")),
         ("RECEIPT NO", inv.get("receipt_no", "–")),
         ("REF NO",     inv.get("ref_no", "–")),
-        ("CARD TYPE",  inv.get("card_type", "–")),
+        ("TYPE",        inv.get("payment_type", "–")),
     ]
     field_right = [
         ("DATE",         inv.get("date", "–")),
         ("DUE DATE",     inv.get("due_date", inv.get("date", "–"))),
-        ("PAYMENT TYPE", inv.get("payment_type", "–")),
+        # TYPE merged into left column
         ("CARD NO",      inv.get("card_no", "–")),
         ("REMARKS",      (inv["remarks"][0] if isinstance(inv["remarks"], list) else str(inv["remarks"])) if inv.get("remarks") else "–"),
     ]

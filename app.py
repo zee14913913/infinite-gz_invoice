@@ -513,8 +513,7 @@ IGZ_COLS = [
     "Due Date",
     "Bill To",
     "Company",
-    "Payment Type",        # dropdown
-    "Card Type",           # dropdown
+    "Type",                # dropdown: VISA CREDIT/MASTERCARD/AMEXCARD/DEBIT/CASH/TRANSFER
     "Card No",
     "Approval Code",
     "Receipt No",
@@ -541,8 +540,7 @@ AST_COLS = [
     "Due Date",
     "Bill To",
     "Company",
-    "Payment Type",
-    "Card Type",
+    "Type",
     "Card No",
     "Approval Code",
     "Receipt No",
@@ -641,7 +639,7 @@ def _col_widths(company: str) -> dict:
     # Both companies now have the same 4-column product structure
     base = {
         "Invoice No": 13, "Date": 14, "Due Date": 14, "Bill To": 16,
-        "Company": 22, "Payment Type": 14, "Card Type": 12, "Card No": 22,
+        "Company": 22, "Type": 18, "Card No": 22,
         "Approval Code": 14, "Receipt No": 12, "Ref No": 18,
         "Product Item": 48,
         "Qty": 6, "Unit Price (RM)": 15, "Total Amount (RM)": 16,
@@ -663,29 +661,17 @@ def _add_dropdowns(ws, company: str):
         idx = COLS.index(name) + 1
         return get_column_letter(idx)
 
-    # ── Payment Type dropdown ──────────────────────────────────────
-    if "Payment Type" in COLS:
-        dv_pay = DataValidation(
+    # ── Type dropdown (merged Payment Type + Card Type) ─────────────
+    if "Type" in COLS:
+        dv_type = DataValidation(
             type="list",
-            formula1='"Cash,Visa,Master,Amex,Transfer,E-Wallet"',
+            formula1='"VISA CREDIT,MASTERCARD,AMEXCARD,DEBIT,CASH,TRANSFER"',
             allow_blank=True, showDropDown=False,
         )
-        dv_pay.sqref       = f"{col_letter('Payment Type')}3:{col_letter('Payment Type')}500"
-        dv_pay.prompt      = "请选择付款方式"
-        dv_pay.promptTitle = "Payment Type"
-        ws.add_data_validation(dv_pay)
-
-    # ── Card Type dropdown ────────────────────────────────────────
-    if "Card Type" in COLS:
-        dv_card = DataValidation(
-            type="list",
-            formula1='"Credit,Debit"',
-            allow_blank=True, showDropDown=False,
-        )
-        dv_card.sqref      = f"{col_letter('Card Type')}3:{col_letter('Card Type')}500"
-        dv_card.prompt     = "Credit 或 Debit"
-        dv_card.promptTitle= "Card Type"
-        ws.add_data_validation(dv_card)
+        dv_type.sqref       = f"{col_letter('Type')}3:{col_letter('Type')}500"
+        dv_type.prompt      = "请选择付款类型"
+        dv_type.promptTitle = "Type"
+        ws.add_data_validation(dv_type)
 
     # ── Product Item dropdown (both companies, different lists) ──
     if "Product Item" in COLS:
@@ -850,42 +836,63 @@ def parse_receipt(text: str, company: str) -> dict:
         r"card\s*holder\s*name[\s.:]+([A-Za-z0-9 .,'&/-]+?)(?=\n|\Z)",
         r"card\s*holder[\s.:]+([A-Za-z0-9 .,'&/-]+?)(?=\n|\Z)",
         r"name[\s.:]+([A-Z][A-Za-z0-9 .,'&/-]{3,})(?=\n|\Z)",
-        r"(?:^|\n)([A-Z][A-Z0-9 .,'&/-]{5,})(?=\n)",   # Maybank: all-caps line after header
+        # NOTE: all-caps catch-all removed (grabs bank names like PUBLIC BANK)  # CC_SEED/card_map is the authoritative Bill To source
     ])
     d["Bill To"] = re.sub(r"\s+", " ", (raw_bill or "")).strip()
 
-    # ── Auto-lookup Bill To from card map if still empty ─────────
-    if not d["Bill To"] and d.get("Card No"):
+    # ── Auto-lookup Bill To from card map (ALWAYS override OCR grab) ────────
+    # card_map is authoritative: even if OCR wrongly filled Bill To with a
+    # bank name (e.g. "PUBLIC BANK"), the card_map lookup will correct it.
+    if d.get("Card No"):
         _auto_bt = lookup_bill_to(d["Card No"])
         if _auto_bt:
             d["Bill To"] = _auto_bt
             d["_bill_to_source"] = "card_map"   # flag for UI badge
 
-    # ── Payment Type ─────────────────────────────────────────────
-    # Detect from VISA CREDIT / MASTERCARD CREDIT / CASH etc.
-    pay_raw = _s([
-        r"host\s+(visa|mastercard|master|amex|cash|transfer)",
-        r"(visa|mastercard|master|amex|cash|transfer|e[.\-]?wallet)",
+    # ── Type (merged: Payment Network + Credit/Debit) ────────────
+    # Receipt line: "VISA CREDIT" / "MASTERCARD" / "AMEX" / "DEBIT" / "CASH" / "TRANSFER"
+    # Maps to dropdown: VISA CREDIT, MASTERCARD, AMEXCARD, DEBIT, CASH, TRANSFER
+    _type_raw = _s([
+        r"(visa\s+credit)",           # VISA CREDIT  (exact receipt line)
+        r"(mastercard\s+credit)",     # MASTERCARD CREDIT
+        r"(master\s+credit)",
+        r"(mastercard)",               # bare MASTERCARD
+        r"(amex\s+credit)",
+        r"(amexcard)",
+        r"(amex)",
+        r"host\s+(visa|mastercard|master|amex)",   # HOST VISA line
+        r"\b(debit)\b",
+        r"\b(cash)\b",
+        r"\b(transfer)\b",
     ])
-    pay_map = {"visa":"Visa","mastercard":"Master","master":"Master",
-               "amex":"Amex","cash":"Cash","transfer":"Transfer","e-wallet":"E-Wallet",
-               "ewallet":"E-Wallet","e.wallet":"E-Wallet"}  # all e-wallet variants
-    # Normalise e-wallet variants before lookup
-    _pay_key = re.sub(r"e[.\-]?wallet", "e-wallet", (pay_raw or "").lower())
-    d["Payment Type"] = pay_map.get(_pay_key, pay_raw or "")
+    _type_map = {
+        "visa credit":       "VISA CREDIT",
+        "mastercard credit": "MASTERCARD",
+        "master credit":     "MASTERCARD",
+        "mastercard":        "MASTERCARD",
+        "amex credit":       "AMEXCARD",
+        "amexcard":          "AMEXCARD",
+        "amex":              "AMEXCARD",
+        "visa":              "VISA CREDIT",
+        "master":            "MASTERCARD",
+        "debit":             "DEBIT",
+        "cash":              "CASH",
+        "transfer":          "TRANSFER",
+    }
+    _type_key = (_type_raw or "").lower().strip()
+    d["Type"] = _type_map.get(_type_key, (_type_raw or "").upper())
 
-    # ── Card Type ────────────────────────────────────────────────
-    # Payment Type = Visa / MasterCard / Amex (network)
-    # Card Type    = CREDIT / DEBIT (usage type)
-    # Priority: same-line "VISA CREDIT" → "CREDIT CARD" → "CARD TYPE:" → standalone word
-    card_raw = _s([
-        r"(?:visa|master(?:card)?|amex)\s+(credit|debit)",   # VISA CREDIT on same line
-        r"(credit|debit)\s+card",                              # CREDIT CARD
-        r"card\s*type[\s.:]+([A-Za-z]+)",                    # CARD TYPE: CREDIT
-        r"card\s*use\s*type[\s.:]+([A-Za-z]+)",             # CARD USE TYPE:
-        r"\b(credit|debit)\b",                               # standalone word fallback
-    ])
-    d["Card Type"] = (card_raw or "").upper() if card_raw else ""
+    # Keep legacy keys for PDF builder compatibility (will be removed in v13)
+    if "VISA" in d["Type"]:
+        d["Payment Type"] = "Visa"; d["Card Type"] = "CREDIT"
+    elif "MASTERCARD" in d["Type"]:
+        d["Payment Type"] = "Master"; d["Card Type"] = "CREDIT"
+    elif "AMEX" in d["Type"]:
+        d["Payment Type"] = "Amex"; d["Card Type"] = "CREDIT"
+    elif "DEBIT" in d["Type"]:
+        d["Payment Type"] = ""; d["Card Type"] = "DEBIT"
+    else:
+        d["Payment Type"] = d["Type"]; d["Card Type"] = ""
 
     # ── Card No ──────────────────────────────────────────────────
     # Matches many Malaysian POS formats:
@@ -894,12 +901,15 @@ def parse_receipt(text: str, company: str) -> dict:
     #   4617 72xx xxxx 3964   (lowercase x)
     #   4617 XXXX XXXX 3964   (fully masked middle)
     #   CARD : 4617 72XX XXXX 3964
+    # Masked char set: OCR may read mask as * X x . • – or digit
+    _MASK = r"[0-9X*x.•\-]"
     _card_raw = _s([
-        # Standard 4-group masked formats: 4617 72XX XXXX 3964
-        r"card\s*no\.?[\s.:]+([0-9]{4}[\s-][0-9X*x]{2,6}[\s-][0-9X*x ]{2,6}[\s-][0-9]{4})",
-        r"card[:\s]+([0-9]{4}[\s-][0-9X*x]{2,6}[\s-][0-9X*x ]{2,6}[\s-][0-9]{4})",
-        r"([0-9]{4}\s+[0-9X*x]{2,6}\s+[0-9X*x ]{2,}\s+[0-9]{4})",
-        # Full-star mask: ************8888 (Maybank style – 12 stars + last 4 digits)
+        # With "CARD NO:" label (highest confidence)
+        r"card\s*no\.?[\s.:]+([0-9]{4}[\s-]" + _MASK + r"{2,6}[\s-]" + _MASK + r"{2,6}[\s-][0-9]{4})",
+        r"card[:\s]+([0-9]{4}[\s-]" + _MASK + r"{2,6}[\s-]" + _MASK + r"{2,6}[\s-][0-9]{4})",
+        # Bare 4-group format on its own line (no label) — broadened mask chars
+        r"([0-9]{4}\s+" + _MASK + r"{2,6}\s+" + _MASK + r"+\s+[0-9]{4})",
+        # Full-star mask: ************8888
         r"card\s*no\.?[\s.:]+([*]{8,}\s*[0-9]{4})",
         r"([*]{8,}[0-9]{4})",
         # Looser catch-all with card no label
@@ -907,6 +917,16 @@ def parse_receipt(text: str, company: str) -> dict:
     ])
     # Normalise: replace lowercase x → X for consistency
     d["Card No"] = re.sub(r"x", "X", _card_raw).strip() if _card_raw else ""
+
+    # ── Fallback: if Card No still empty, try last-4 from any partial card line ─
+    if not d["Card No"]:
+        # Matches lines like "4617 72** **** 3964" even with unusual OCR chars
+        m_last4 = re.search(
+            r"([0-9]{4}[\s\S]{4,20}?\b([0-9]{4})\b)(?:\s|$)",
+            text, re.IGNORECASE | re.MULTILINE
+        )
+        if m_last4:
+            d["Card No"] = m_last4.group(1).strip()
 
     # ── Approval Code ────────────────────────────────────────────
     # Pad to 6 chars with leading zeros (some banks strip leading zero, e.g. 85944 → 085944)
@@ -1003,8 +1023,8 @@ def generate_invoice_pdf(company: str, data: dict, inv_number: str,
         "due_date":     data.get("Due Date", data.get("Date","")),
         "bill_to":      data.get("Bill To",""),
         "company":      data.get("Company","–"),
-        "payment_type": data.get("Payment Type",""),
-        "card_type":    data.get("Card Type",""),
+        "payment_type": data.get("Type", data.get("Payment Type","")),
+        "card_type":    data.get("Card Type",""),  # kept for PDF compat
         "card_no":      data.get("Card No",""),
         "approval":     data.get("Approval Code",""),
         "receipt_no":   data.get("Receipt No",""),
@@ -1277,17 +1297,28 @@ def main():
                 d.get("Company",""),
                 help="唯一需手动输入的字段")
 
-            # Payment Type — dropdown for BOTH companies
-            pay_opts = ["","Cash","Visa","Master","Amex","Transfer","E-Wallet"]
-            cur_pay  = d.get("Payment Type","")
-            idx_pay  = pay_opts.index(cur_pay) if cur_pay in pay_opts else 0
-            d["Payment Type"] = st.selectbox("Payment Type", pay_opts, index=idx_pay)
-
-            # Card Type — dropdown for BOTH companies
-            card_opts = ["","Credit","Debit"]
-            cur_card  = d.get("Card Type","")
-            idx_card  = card_opts.index(cur_card) if cur_card in card_opts else 0
-            d["Card Type"] = st.selectbox("Card Type", card_opts, index=idx_card)
+            # ── TYPE dropdown (merged Payment + Card type) ────────────
+            type_opts = ["","VISA CREDIT","MASTERCARD","AMEXCARD","DEBIT","CASH","TRANSFER"]
+            cur_type  = d.get("Type","")
+            # backward-compat: if old Payment Type existed, derive Type
+            if not cur_type and d.get("Payment Type"):
+                _pt = d.get("Payment Type","").lower()
+                _ct = d.get("Card Type","").lower()
+                if "visa"   in _pt: cur_type = "VISA CREDIT"
+                elif "master" in _pt: cur_type = "MASTERCARD"
+                elif "amex"   in _pt: cur_type = "AMEXCARD"
+                elif "debit"  in _ct: cur_type = "DEBIT"
+                elif "cash"   in _pt: cur_type = "CASH"
+                elif "transfer" in _pt: cur_type = "TRANSFER"
+            idx_type  = type_opts.index(cur_type) if cur_type in type_opts else 0
+            d["Type"] = st.selectbox("💳 Type", type_opts, index=idx_type,
+                                      help="VISA CREDIT / MASTERCARD / AMEXCARD / DEBIT / CASH / TRANSFER")
+            # Sync legacy fields for PDF builder
+            if "VISA"   in d["Type"]: d["Payment Type"]="Visa";   d["Card Type"]="CREDIT"
+            elif "MASTER" in d["Type"]: d["Payment Type"]="Master"; d["Card Type"]="CREDIT"
+            elif "AMEX"   in d["Type"]: d["Payment Type"]="Amex";   d["Card Type"]="CREDIT"
+            elif "DEBIT"  in d["Type"]: d["Payment Type"]="";       d["Card Type"]="DEBIT"
+            else: d["Payment Type"]=d["Type"]; d["Card Type"]=""
 
         # ── Right column ─────────────────────────────────────────
         with c2:
@@ -1590,7 +1621,7 @@ def main():
     lc   = "6B5B95" if is_ast else "1A1A1A"
     COL_W = {
         "Invoice No":130,"Date":110,"Due Date":110,"Bill To":120,"Company":160,
-        "Payment Type":115,"Card Type":100,"Card No":175,"Approval Code":115,
+        "Type":140,"Card No":175,"Approval Code":115,
         "Receipt No":105,"Ref No":150,
         "Product Item":310,
         "Qty":65,"Unit Price (RM)":120,"Total Amount (RM)":135,

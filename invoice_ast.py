@@ -164,8 +164,7 @@ def draw_ast_invoice(c, inv):
         ("Invoice No :",   str(inv.get("inv_no", ""))),
         ("Bill To :",      str(inv.get("bill_to", ""))),
         ("Company :",      str(inv.get("company", "–"))),
-        ("Payment :",      str(inv.get("payment_type", ""))),
-        ("Card Type :",    str(inv.get("card_type", ""))),
+        ("Type :",          str(inv.get("payment_type", ""))),  # VISA CREDIT / MASTERCARD / etc.
         ("Approval :",     str(inv.get("approval", ""))),
     ]
     right_fields = [
@@ -349,8 +348,7 @@ def draw_ast_invoice(c, inv):
     REM_W   = TW * 0.48
 
     pd_fields = [
-        ("Card Type :",      inv.get("card_type", "–")),
-        ("Payment Type :",   inv.get("payment_type", "–")),
+        ("Type :",            inv.get("payment_type", "–")),
         ("Card No :",        inv.get("card_no", "–")),
         ("Approval Code :",  inv.get("approval", "–")),
         ("Ref No :",         inv.get("ref_no", "–")),
