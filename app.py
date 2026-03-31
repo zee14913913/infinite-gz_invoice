@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-INFINITE GZ + AI SMART TECH — Invoice Management System  v3 (patch-v12.5)
+INFINITE GZ + AI SMART TECH — Invoice Management System  v3 (patch-v12.7)
 =============================================================
 Changes vs v2:
   • IGZ: Items (JSON) → 4 cols: Product Item / Qty / Unit Price (RM) / Total Amount (RM)
@@ -899,8 +899,38 @@ def _clean_inv_no(raw: str) -> str:
     return s
 
 
+
+def _normalize_ocr(t: str) -> str:
+    """
+    Fix common Tesseract OCR misreads in numeric-only fields of POS receipts.
+
+    Tesseract regularly confuses:
+      digit  0  →  letter  O / o   (especially in leading zeros: 000962 → OOO962)
+      digit  1  →  letter  l / I   (especially 1685 → l685)
+      digit  6  →  letter  G / b
+      digit  5  →  letter  S
+
+    Strategy: replace O/o with 0 only when the character appears inside
+    an otherwise-all-digit sequence (flanked by digits or at word start).
+    Also fixes I/l→1 and S→5 in digit-only tokens.
+    """
+    import re as _re
+    # Replace O/o with 0 when between digits
+    t = _re.sub(r'(?<=[0-9])[Oo](?=[0-9])', '0', t)
+    # Replace leading O/o in a sequence that is otherwise all digits
+    # e.g. "OOO962" → "000962", "OO1685" → "001685", "O85944" → "085944"
+    for _ in range(4):   # up to 4 leading O's
+        t = _re.sub(r'([Oo]+)([0-9]{3,})', lambda m: '0' * len(m.group(1)) + m.group(2), t)
+    # Replace I/l with 1 when flanked by digits
+    t = _re.sub(r'(?<=[0-9])[Il](?=[0-9])', '1', t)
+    t = _re.sub(r'[Il]([0-9]{3,})', lambda m: '1' + m.group(1), t)
+    return t
+
 def parse_receipt(text: str, company: str, roi_text: str = "") -> dict:
     _roi_text = roi_text or ""
+    # ── Normalise OCR misreads (O→0, l→1) before any regex matching ──
+    text      = _normalize_ocr(text)
+    _roi_text = _normalize_ocr(_roi_text)
     d = {}
     def _s(patterns):
         for pat in patterns:
@@ -1093,7 +1123,7 @@ def parse_receipt(text: str, company: str, roi_text: str = "") -> dict:
             _candidate_line = _block_m.group(1).strip()
             # Must be a 16-digit 4-group line; mask chars allowed in groups 2-3
             _cm = re.match(
-                r"^([0-9]{4}\s+[0-9X*x.•]{4}\s+[X*x.•*]{4}\s+[0-9]{4})\s*$",
+                r"^([0-9]{4}\s+[0-9][0-9][^\s\d]{2}\s+[^\s\d]{4}\s+[0-9]{4})\s*$",
                 _candidate_line, re.IGNORECASE
             )
             if _cm:
@@ -1103,8 +1133,8 @@ def parse_receipt(text: str, company: str, roi_text: str = "") -> dict:
         if not _card_raw:
             _card_raw = _s([
                 r"card\s*no\.?[\s.:]+([0-9]{4}\s+" + _MASK + r"{4}\s+" + _MASK + r"{4}\s+[0-9]{4})",
-                r"([0-9]{4}\s+" + _MASK + r"{4}\s+" + _MASK + r"{4}\s+[0-9]{4})",
-                r"([*]{8,12}[0-9]{4})",
+                r"([0-9]{4}\s+[0-9]{2}[^\s\d]{2}\s+[^\s\d]{4}\s+[0-9]{4})",
+                r"([*X]{8,12}[0-9]{4})",
             ])
 
     # Normalise mask chars → uppercase X, then store
@@ -1374,7 +1404,7 @@ def main():
     <div style='background:{bar_col};color:#fff;padding:13px 20px;border-radius:10px;
                 display:flex;align-items:center;justify-content:space-between;margin-bottom:16px'>
         <span style='font-size:19px;font-weight:800'>{'💼' if is_ast else '🏢'} {company}</span>
-        <span style='font-size:11px;opacity:.7'>Invoice Management System v3 (OCR v12.5)</span>
+        <span style='font-size:11px;opacity:.7'>Invoice Management System v3 (OCR v12.7)</span>
     </div>""", unsafe_allow_html=True)
 
     if st.button("← 切换公司 / Switch Company"):
@@ -1410,6 +1440,8 @@ def main():
                 parsed   = parse_receipt(raw, company, roi_text=roi_text)
                 parsed["Receipt Link"] = str(rec_path)
                 st.session_state.parsed_data = parsed
+                st.session_state._ocr_raw_text = raw          # v12.7: store for debug
+                st.session_state._ocr_roi_text = roi_text     # v12.7: ROI crop text
                 row_num = append_row(wb, ws, parsed, excel_path, company)
                 st.session_state.excel_row = row_num
             st.success(f"✅ 收据已解析，已写入 Excel 第 {row_num} 行")
@@ -1422,6 +1454,17 @@ def main():
         with st.expander("📎 已上传的收据", expanded=False):
             try: st.image(st.session_state.receipt_path, width=420)
             except: st.write(st.session_state.receipt_path)
+
+    # ── v12.7: OCR Debug panel (collapse by default) ──────────────
+    _ocr_raw = st.session_state.get("_ocr_raw_text", "")
+    _ocr_roi = st.session_state.get("_ocr_roi_text", "")
+    if _ocr_raw:
+        with st.expander("🔬 OCR 原始文字（Debug 专用）", expanded=False):
+            st.caption("Full OCR text — 供调试正则用，不影响业务流程")
+            st.code(_ocr_raw, language="text")
+            if _ocr_roi:
+                st.caption("ROI Crop (左半 INV NO 区域)")
+                st.code(_ocr_roi, language="text")
 
     # ── STEP 2: Review & Edit ─────────────────────────────────────
     if st.session_state.parsed_data:
