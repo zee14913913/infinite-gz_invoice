@@ -263,6 +263,141 @@ AST_PACKAGES = {
     "Custom Package": [],  # User defines sub-items manually
 }
 
+# ══════════════════════════════════════════════════════════════════════
+#  AST Fixed Packages  (SST-safe, 6 price points × Combo A / B)
+#  Invoice format: package main line = card_total  |  sub-items = RM 0.00
+#  No Promo Rebate required
+# ══════════════════════════════════════════════════════════════════════
+AST_FIXED_PACKAGES = {
+    4999: {
+        "A": {
+            "name": "Business Growth Campaign Package",
+            "items": [
+                "Online Platform Management",
+                "Search Visibility Improvement Program",
+                "Business Strategy Advisory",
+            ],
+        },
+        "B": {
+            "name": "Brand Development & Outreach Package",
+            "items": [
+                "Corporate Visual Identity Creation",
+                "Business Promotion Campaign",
+                "Project Advisory",
+            ],
+        },
+    },
+    8888: {
+        "A": {
+            "name": "Business Online Presence Package",
+            "items": [
+                "Corporate Web Platform Setup",
+                "Online Visibility Enhancement Program",
+                "Project Management Advisory",
+            ],
+        },
+        "B": {
+            "name": "Market Expansion Campaign Package",
+            "items": [
+                "Multi-Channel Promotion Campaign",
+                "Social Platform Content Management",
+                "Corporate Visual Identity Creation",
+            ],
+        },
+    },
+    18888: {
+        "A": {
+            "name": "E-Commerce Business Platform Package",
+            "items": [
+                "Online Retail Platform Setup",
+                "Business Promotion & Outreach Campaign",
+                "Team Capability Development Program",
+            ],
+        },
+        "B": {
+            "name": "Enterprise Business Continuity Package",
+            "items": [
+                "Long-Term Business Support Program",
+                "Workspace Equipment Deployment",
+                "Business Operations Advisory",
+            ],
+        },
+    },
+    21888: {
+        "A": {
+            "name": "Enterprise Business Management System Package",
+            "items": [
+                "Custom Business Operations Platform",
+                "Client Relationship Management Solution",
+                "Business Process Advisory",
+            ],
+        },
+        "B": {
+            "name": "Business Process Automation Package",
+            "items": [
+                "Automated Workflow Optimisation Solution",
+                "Intelligent Customer Engagement Platform",
+                "Client Management Support Solution",
+                "Business Advisory",
+            ],
+        },
+    },
+    28888: {
+        "A": {
+            "name": "Enterprise Digital Business Solution Package",
+            "items": [
+                "Custom Enterprise Business Platform",
+                "Business Performance Intelligence Report",
+                "Business Operations Advisory",
+            ],
+        },
+        "B": {
+            "name": "Business Infrastructure & Automation Package",
+            "items": [
+                "Business Infrastructure Modernisation",
+                "Automated Business Process Solution",
+                "Team Capability Development Program",
+                "Business Advisory",
+            ],
+        },
+    },
+    37776: {
+        "A": {
+            "name": "Enterprise Infrastructure Setup Package",
+            "items": [
+                "Enterprise Equipment & Facility Setup",
+                "Client Relationship Management Solution",
+                "Team Capability Development Program",
+                "Business Operations Advisory",
+            ],
+        },
+        "B": {
+            "name": "Digital Business Transformation Package",
+            "items": [
+                "Business Process Automation Solution",
+                "Business Infrastructure Modernisation",
+                "Corporate Visual Identity Creation",
+                "Team Capability Development Program",
+                "Business Advisory",
+            ],
+        },
+    },
+}
+
+
+def get_ast_fixed_package(total: float, combo: str = "A"):
+    """
+    Return the fixed package dict {name, items} for AST based on
+    card total and combo selection (A or B).
+    Returns None if total does not match any known price point.
+    """
+    key = int(round(total))
+    pkgs = AST_FIXED_PACKAGES.get(key)
+    if pkgs:
+        return pkgs.get(combo.upper())
+    return None
+
+
 IGZ_PACKAGES = {
     "": [],
     "Financing Arrangement Package": [
@@ -747,6 +882,16 @@ def ocr_image(img: Image.Image) -> str:
     return pytesseract.image_to_string(img, lang="eng")
 
 
+def _ocr_inv_no_roi(img: Image.Image) -> str:
+    """Crop left-half / upper-middle band of receipt to isolate INV NO from TRACE NO.
+    Public Bank layout: INV NO (left) | TRACE NO (right) — same line, above SALE.
+    Crop: x 0–50%, y 25–58% of image height → only INV NO survives.
+    """
+    w, h = img.size
+    roi = img.crop((0, int(h * 0.25), int(w * 0.50), int(h * 0.58)))
+    return pytesseract.image_to_string(roi, lang="eng", config="--psm 6")
+
+
 def _clean_inv_no(raw: str) -> str:
     """Strip INV- / INV_ prefix; return bare number/code string."""
     s = raw.strip()
@@ -754,7 +899,8 @@ def _clean_inv_no(raw: str) -> str:
     return s
 
 
-def parse_receipt(text: str, company: str) -> dict:
+def parse_receipt(text: str, company: str, roi_text: str = "") -> dict:
+    _roi_text = roi_text or ""
     d = {}
     def _s(patterns):
         for pat in patterns:
@@ -764,38 +910,54 @@ def parse_receipt(text: str, company: str) -> dict:
         return ""
 
     # ── Invoice No ────────────────────────────────────────────────
-    # Matches: INV NO 000962 / INVOICE NO / #000962 / NO. 000962
-    # NOTE: POS card receipts typically do NOT have invoice numbers.
-    # Invoice No is populated if the receipt is a tax invoice / OR
-    # the user manually types it in Step 2.
-    raw_inv = _s([
-        r"invoice\s*no[.:\s]+([0-9A-Z\-_/]+)",
-        r"[il]nvoice\s*no\.?\s*[:\s]+([0-9A-Z\-_/]+)",
-        r"inv(?:oice)?\s*no[.:\s]+([A-Z0-9_\-/]+)",
-        r"inv[-_]?no[.:\s]+([A-Z0-9_\-/]+)",
-        r"inv\s*no[.:\s]+([0-9]{3,})",
-        r"#\s*([0-9]{4,})",                    # #000962
-        r"no\.\s*([0-9]{4,})",               # NO. 000962
-        r"receipt\s*#\s*([0-9A-Z\-]{4,})",  # RECEIPT # 2026-001
-    ])
+    # Strategy: 3-layer approach for 100% accuracy
+    # Layer 1 – ROI text (left-half crop, physically separates INV NO from TRACE NO)
+    # Layer 2 – OCR-tolerant regex (handles I→1/l, O→0/C misreads)
+    # Layer 3 – Strict {6} pure-digit rule (rejects any non-6-digit result)
+    def _s6(patterns, src):
+        """Like _s() but searches in src string instead of full text."""
+        for pat in patterns:
+            m = re.search(pat, src, re.IGNORECASE | re.MULTILINE)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    _INV_PATTERNS = [
+        r"inv\s*n[o0c][.\s]+([0-9]{6})\s+trace",   # same-line lookahead: stop before TRACE
+        r"[il1]nv\s*n[o0c][.:\s]+([0-9]{6})",       # OCR typo-tolerant: I→1/l, O→0/C
+        r"invoice\s*no[.:\s]+([0-9]{6})",            # standard label
+        r"inv(?:oice)?\s*no[.:\s]+([0-9]{6})",       # short variant
+        r"inv\s*no[.:\s]+([0-9]{6})",                # shortest variant
+    ]
+
+    # Try ROI text first (most reliable — TRACE NO physically absent)
+    raw_inv = _s6(_INV_PATTERNS, _roi_text) if _roi_text else ""
+    # Fallback to full OCR text if ROI missed
+    if not raw_inv:
+        raw_inv = _s6(_INV_PATTERNS, text)
     d["Invoice No"] = _clean_inv_no(raw_inv) if raw_inv else ""
 
     # ── Receipt No / Trace No ─────────────────────────────────────
-    # Covers: RECEIPT NO / TRACE NO. / RETRIEVAL REF NO / STAN / RRN / SEQ NO
-    # Also handles dots in labels: TRACE NO. / RETRIEVAL REF. NO.
-    d["Receipt No"] = _s([
-        r"receipt\s*no\.?\s*:\s*trace\s*no\.?\s*[\n\r]+\s*([0-9]+)",  # multiline HLB
-        r"receipt\s*no[.:\s]+([0-9]{3,})",
-        r"trace\s*no\.?\s*[.:\s]+([0-9]{3,})",                  # TRACE NO. / TRACE NO:
-        r"trace\s*number\s*[:\s]+([0-9]{3,})",
-        r"stan\s*/\s*trace[.:\s]+([0-9]{3,})",
-        r"stan[.:\s]+([0-9]{3,})",
-        r"rrn\s*[:\s]+([0-9]{6,})",
-        r"seq\s*no[.:\s]+([0-9]{3,})",
-        r"sequence\s*no[.:\s]+([0-9]{3,})",
-        r"host\s*trace\s*[:\s]+([0-9]{3,})",
-        r"trace[:\s]+([0-9]{3,})",
+    # Position: right side of the line directly above SALE keyword.
+    # Public Bank: TRACE NO (right-side label) → 6-digit answer.
+    # Format locked: exactly 6 pure digits.
+    # Also supports other banks: STAN, RRN, SEQ NO, HOST TRACE.
+    _receipt_raw = _s([
+        # Priority 1: same-line format  "INV NO 000962  TRACE NO 001685"
+        # lookahead stops at end-of-line, extract digits after TRACE NO
+        r"trace\s*no\.?\s*[.:\s]+([0-9]{6})(?:\s|$)",           # TRACE NO → 6 digits
+        r"trace\s*number\s*[:\s]+([0-9]{6})(?:\s|$)",
+        r"stan\s*/\s*trace[.:\s]+([0-9]{6})(?:\s|$)",
+        r"stan[.:\s]+([0-9]{6})(?:\s|$)",
+        r"rrn\s*[:\s]+([0-9]{6})(?:\s|$)",
+        r"seq\s*no[.:\s]+([0-9]{6})(?:\s|$)",
+        r"sequence\s*no[.:\s]+([0-9]{6})(?:\s|$)",
+        r"host\s*trace\s*[:\s]+([0-9]{6})(?:\s|$)",
+        r"receipt\s*no\.?\s*:\s*trace\s*no\.?\s*[\n\r]+\s*([0-9]{6})",  # HLB multiline
+        r"receipt\s*no[.:\s]+([0-9]{6})(?:\s|$)",
+        r"trace[:\s]+([0-9]{6})(?:\s|$)",
     ])
+    d["Receipt No"] = _receipt_raw or ""
 
     # ── Date ──────────────────────────────────────────────────────
     # Handles: 26MAR2026 / 26/03/2026 / 26-03-2026 / 26 MAR 2026
@@ -895,66 +1057,95 @@ def parse_receipt(text: str, company: str) -> dict:
         d["Payment Type"] = d["Type"]; d["Card Type"] = ""
 
     # ── Card No ──────────────────────────────────────────────────
-    # Matches many Malaysian POS formats:
-    #   4617 72** **** 3964   (asterisk mask)
-    #   4617 72XX XXXX 3964   (X mask, HLB/Maybank)
-    #   4617 72xx xxxx 3964   (lowercase x)
-    #   4617 XXXX XXXX 3964   (fully masked middle)
-    #   CARD : 4617 72XX XXXX 3964
-    # Masked char set: OCR may read mask as * X x . • – or digit
-    _MASK = r"[0-9X*x.•\-]"
-    _card_raw = _s([
-        # With "CARD NO:" label (highest confidence)
-        r"card\s*no\.?[\s.:]+([0-9]{4}[\s-]" + _MASK + r"{2,6}[\s-]" + _MASK + r"{2,6}[\s-][0-9]{4})",
-        r"card[:\s]+([0-9]{4}[\s-]" + _MASK + r"{2,6}[\s-]" + _MASK + r"{2,6}[\s-][0-9]{4})",
-        # Bare 4-group format on its own line (no label) — broadened mask chars
-        r"([0-9]{4}\s+" + _MASK + r"{2,6}\s+" + _MASK + r"+\s+[0-9]{4})",
-        # Full-star mask: ************8888
-        r"card\s*no\.?[\s.:]+([*]{8,}\s*[0-9]{4})",
-        r"([*]{8,}[0-9]{4})",
-        # Looser catch-all with card no label
-        r"card\s*no\.?[\s.:]+([0-9*Xx\s]{13,25})",
-    ])
-    # Normalise: replace lowercase x → X for consistency
-    d["Card No"] = re.sub(r"x", "X", _card_raw).strip() if _card_raw else ""
+    # Strategy: Use Type result to locate card number.
+    # For VISA CREDIT / MASTERCARD / AMEXCARD:
+    #   Position = line immediately after the Type keyword, before DATE/TIME line.
+    #   Fixed format: 16 digits in 4 groups of 4, space-separated.
+    #   Groups: [4 digits] [2 digits + 2 *] [4 *] [4 digits]
+    #   Example: 4617 72** **** 3964
+    #   OCR mask chars: * X x . • (all normalised to *)
+    # For CASH / TRANSFER / DEBIT / E-WALLET: Card No is empty.
 
-    # ── Fallback: if Card No still empty, try last-4 from any partial card line ─
-    if not d["Card No"]:
-        # Matches lines like "4617 72** **** 3964" even with unusual OCR chars
-        m_last4 = re.search(
-            r"([0-9]{4}[\s\S]{4,20}?\b([0-9]{4})\b)(?:\s|$)",
-            text, re.IGNORECASE | re.MULTILINE
+    # Mask character set OCR may use: * X x . •
+    _MASK = r"[0-9X*x.•\-]"
+
+    # 16-digit 4-group pattern (strict: each group exactly 4 chars)
+    _card16 = (
+        r"([0-9]{4}"
+        r"\s+[0-9" + r"X*x.•]{4}"
+        r"\s+[X*x.•]{4}"
+        r"\s+[0-9]{4})"
+    )
+
+    _card_raw = ""
+    _type_val = d.get("Type", "")
+
+    if _type_val in ("VISA CREDIT", "MASTERCARD", "AMEXCARD"):
+        # ── Step 1: Find the Type keyword line, then grab the very next line ──
+        # OCR text between Type label and DATE/TIME line contains the card number.
+        _type_kw = _type_val.replace(" ", r"\s+")
+        # Extract block: from Type keyword line up to DATE/TIME line
+        _block_m = re.search(
+            _type_kw + r"[^\n]*\n([^\n]+)\n",
+            text, re.IGNORECASE
         )
-        if m_last4:
-            d["Card No"] = m_last4.group(1).strip()
+        if _block_m:
+            _candidate_line = _block_m.group(1).strip()
+            # Must be a 16-digit 4-group line; mask chars allowed in groups 2-3
+            _cm = re.match(
+                r"^([0-9]{4}\s+[0-9X*x.•]{4}\s+[X*x.•*]{4}\s+[0-9]{4})\s*$",
+                _candidate_line, re.IGNORECASE
+            )
+            if _cm:
+                _card_raw = _cm.group(1)
+
+        # ── Step 2: Fallback – full-text 4-group 16-digit scan ──────────────
+        if not _card_raw:
+            _card_raw = _s([
+                r"card\s*no\.?[\s.:]+([0-9]{4}\s+" + _MASK + r"{4}\s+" + _MASK + r"{4}\s+[0-9]{4})",
+                r"([0-9]{4}\s+" + _MASK + r"{4}\s+" + _MASK + r"{4}\s+[0-9]{4})",
+                r"([*]{8,12}[0-9]{4})",
+            ])
+
+    # Normalise mask chars → uppercase X, then store
+    if _card_raw:
+        _card_norm = re.sub(r"x", "X", _card_raw).strip()
+        d["Card No"] = _card_norm
+    else:
+        d["Card No"] = ""
 
     # ── Approval Code ────────────────────────────────────────────
-    # Pad to 6 chars with leading zeros (some banks strip leading zero, e.g. 85944 → 085944)
+    # Position: centre of receipt, above TOTAL, large bold text.
+    # Format: exactly 6 pure digits. Left-pad with zeros if shorter.
     _appr_raw = _s([
-        r"approval\s*code\s*[:\s]+([A-Z0-9]+)",
-        r"approval\s*code[\s.:]+([A-Z0-9]+)",
-        r"auth(?:orisation)?\s*code[\s.:]+([A-Z0-9]+)",
-        r"auth\s*no\.?[\s.:]+([A-Z0-9]+)",
-        r"approval[\s.:]+([A-Z0-9]+)",
+        r"approval\s*code\s*[:\s]+([0-9]{6})(?:\s|$)",     # exact 6 digits
+        r"approval\s*code[\s.:]+([0-9]{6})(?:\s|$)",
+        r"auth(?:orisation)?\s*code[\s.:]+([0-9]{6})(?:\s|$)",
+        r"auth\s*no\.?[\s.:]+([0-9]{6})(?:\s|$)",
+        r"approval[\s.:]+([0-9]{6})(?:\s|$)",
+        # Fallback: fewer than 6 digits (will be zero-padded below)
+        r"approval\s*code\s*[:\s]+([0-9]{1,5})(?:\s|$)",
+        r"approval[\s.:]+([0-9]{1,5})(?:\s|$)",
     ])
-    # If purely numeric and shorter than 6 digits, left-pad with zeros
-    if _appr_raw and _appr_raw.isdigit() and len(_appr_raw) < 6:
-        _appr_raw = _appr_raw.zfill(6)
+    # Strip any non-digit chars, then zero-pad to exactly 6
+    if _appr_raw:
+        _appr_digits = re.sub(r"[^0-9]", "", _appr_raw)
+        _appr_raw = _appr_digits.zfill(6)[:6]
     d["Approval Code"] = _appr_raw or ""
 
     # ── Ref No ───────────────────────────────────────────────────
-    # Covers: REF NO / REFERENCE NO / RETRIEVAL REF / RETRIEVAL REF. NO. / HOST REF
+    # Position: line directly above APPROVAL CODE, left label + right answer.
+    # Extract the number on the RIGHT side of the label on the same line.
+    # Format: pure digits only, 8-16 digits.
     d["Ref No"] = _s([
-        r"retrieval\s*ref\.?\s*no\.?\s*[:\s]+([0-9A-Z]{6,})",  # RETRIEVAL REF. NO.
-        r"retrieval\s*ref(?:erence)?[:\s]+([0-9A-Z]{6,})",
-        r"ref(?:erence)?\s*no[.:\s]+([0-9A-Z]{6,})",
-        r"host\s*ref(?:erence)?[:\s]+([0-9A-Z]{6,})",
-        r"terminal\s*ref[:\s]+([0-9A-Z]{6,})",
-        r"ref\.?\s*no\.?\s*[:\s]+([0-9A-Z]{6,})",               # REF. NO. (with dots)
-        r"\bref\b[:\s]+([0-9]{6,})",
-        r"ref\s*no[.:\s]+([0-9]{4,})",
+        r"ref(?:erence)?\s*no[.:\s]+([0-9]{8,16})(?:\s|$)",          # REF NO  608514354677
+        r"retrieval\s*ref\.?\s*no\.?\s*[:\s]+([0-9]{8,16})(?:\s|$)", # RETRIEVAL REF. NO.
+        r"retrieval\s*ref(?:erence)?[:\s]+([0-9]{8,16})(?:\s|$)",
+        r"host\s*ref(?:erence)?[:\s]+([0-9]{8,16})(?:\s|$)",
+        r"terminal\s*ref[:\s]+([0-9]{8,16})(?:\s|$)",
+        r"ref\.?\s*no\.?\s*[:\s]+([0-9]{8,16})(?:\s|$)",
+        r"\bref\b[:\s]+([0-9]{8,16})(?:\s|$)",
     ])
-
     # ── Total ────────────────────────────────────────────────────
     # Covers: TOTAL RM 18888 / AMOUNT RM / RM 18888.00 (bare, last numeric)
     total_s = _s([
@@ -1096,7 +1287,7 @@ def main():
         st.markdown("请选择公司 / Select company to proceed:")
         st.markdown("<br>", unsafe_allow_html=True)
 
-        c1, c2, c3 = st.columns([1, 1, 1.2])
+        c1, c2 = st.columns([1, 1])
 
         # ── IGZ card ──────────────────────────────────────────────
         with c1:
@@ -1125,39 +1316,6 @@ def main():
             </div>""", unsafe_allow_html=True)
             if st.button("选择 AI SMART TECH →", key="btn_ast", use_container_width=True):
                 st.session_state.company = "AI SMART TECH SDN BHD"; st.rerun()
-
-        # ── RIGHT COLUMN: both price tables ──────────────────────
-        with c3:
-            tab_igz, tab_ast = st.tabs(["🏢 IGZ 服务价格", "💼 AST 服务价格"])
-
-            with tab_igz:
-                st.markdown("**INFINITE GZ — 2026 业务服务参考价**")
-                # Group headers
-                groups = {
-                    "Group A · 融资安排": [(l,p) for l,p in IGZ_PRODUCTS if l.startswith("[A-")],
-                    "Group B · 记录处理": [(l,p) for l,p in IGZ_PRODUCTS if l.startswith("[B-")],
-                    "Group C · 数字服务": [(l,p) for l,p in IGZ_PRODUCTS if l.startswith("[C-")],
-                    "Group D · 成果分享": [(l,p) for l,p in IGZ_PRODUCTS if l.startswith("[D-")],
-                    "Group E · 账户操作": [(l,p) for l,p in IGZ_PRODUCTS if l.startswith("[E-")],
-                }
-                for gname, items in groups.items():
-                    st.markdown(f"<div style='font-size:10px;font-weight:700;color:#555;margin-top:6px'>{gname}</div>",
-                                unsafe_allow_html=True)
-                    for label, price in items[:4]:
-                        short = re.sub(r"^\[[A-Z]-\d{3}\]\s*","",label)
-                        price_str = f"RM {price:,}" if price > 0 else "–"
-                        st.markdown(
-                            f"<div class='price-row'><b>{price_str}</b> · {short[:38]}</div>",
-                            unsafe_allow_html=True)
-                st.caption("完整列表见 Product Item 下拉菜单（51项）")
-
-            with tab_ast:
-                st.markdown("**AI SMART TECH — 2026 AI 服务参考价**")
-                for label, price in AST_PRODUCTS[:14]:
-                    st.markdown(
-                        f"<div class='price-row'><b>RM {price:,}</b> · {label[:42]}</div>",
-                        unsafe_allow_html=True)
-                st.caption("完整列表见 Product Item 下拉菜单（37项）")
 
         return
 
@@ -1246,9 +1404,10 @@ def main():
 
         try:
             with st.spinner("🔍 正在 OCR 解析收据…"):
-                img    = Image.open(rec_path)
-                raw    = ocr_image(img)
-                parsed = parse_receipt(raw, company)
+                img      = Image.open(rec_path)
+                raw      = ocr_image(img)
+                roi_text = _ocr_inv_no_roi(img)   # left-half crop for INV NO
+                parsed   = parse_receipt(raw, company, roi_text=roi_text)
                 parsed["Receipt Link"] = str(rec_path)
                 st.session_state.parsed_data = parsed
                 row_num = append_row(wb, ws, parsed, excel_path, company)
@@ -1363,20 +1522,85 @@ def main():
             pass
 
         # ── MODE selector ─────────────────────────────────────────────
-        mode_opts = ["🤖 自动选品（Auto-Select）", "📦 手动选套餐（Manual Package）"]
-        cur_mode  = st.session_state.get("item_select_mode", mode_opts[0])
-        if cur_mode not in mode_opts:
-            cur_mode = mode_opts[0]
-        item_mode = st.radio("选择模式", mode_opts,
-                             index=mode_opts.index(cur_mode),
-                             horizontal=True, label_visibility="collapsed")
-        st.session_state["item_select_mode"] = item_mode
+        # ── AST Fixed Package: Combo A/B (bypasses auto-select) ──────────
+        _ast_fixed_pkg = None
+        if _is_ast(company) and receipt_total > 0:
+            _ast_fixed_pkg = get_ast_fixed_package(receipt_total, "A")  # probe only
+
+        if _is_ast(company) and _ast_fixed_pkg is not None:
+            # ── AST FIXED COMBO MODE ──────────────────────────────────────
+            combo_opts = ["A", "B"]
+            cur_combo  = st.session_state.get("ast_combo_select", "A")
+            if cur_combo not in combo_opts:
+                cur_combo = "A"
+            st.markdown(
+                "<div style='color:#7dd3fc;font-size:12px;font-weight:700;"
+                "margin-bottom:6px'>📦 AST 固定配套 — 选择 Combo</div>",
+                unsafe_allow_html=True)
+            sel_combo = st.radio(
+                "Combo",
+                combo_opts,
+                index=combo_opts.index(cur_combo),
+                horizontal=True,
+                format_func=lambda x: f"Combo {x}",
+                label_visibility="collapsed")
+            st.session_state["ast_combo_select"] = sel_combo
+
+            fixed_pkg = get_ast_fixed_package(receipt_total, sel_combo)
+            pkg_name  = fixed_pkg["name"]
+            sub_items = fixed_pkg["items"]
+
+            # Display card
+            st.markdown(f"""
+            <div style='background:#0d1a2d;border-radius:12px;padding:16px 20px;
+                        border-left:4px solid #38bdf8;margin:10px 0'>
+                <div style='color:#7dd3fc;font-size:11px;margin-bottom:4px'>
+                    📦 COMBO {sel_combo} — AI SMART TECH FIXED PACKAGE
+                </div>
+                <div style='color:#fff;font-size:16px;font-weight:800'>{pkg_name}</div>
+                <div style='color:#38bdf8;font-size:20px;font-weight:900;margin-top:6px'>
+                    RM {receipt_total:,.2f}
+                    <span style='color:#4ade80;font-size:13px;margin-left:8px'>
+                        = 收据金额 ✅
+                    </span>
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            st.markdown("**包含项目 (Including):**")
+            for si in sub_items:
+                st.markdown(
+                    f"<div style='padding:5px 12px;margin:2px 0;border-radius:6px;"
+                    f"background:#0a1a2a;color:#93c5fd;font-size:13px'>"
+                    f"↳ {si} &nbsp;&nbsp;"
+                    f"<span style='color:#444'>RM 0.00</span></div>",
+                    unsafe_allow_html=True)
+
+            # Write to data dict — NO Promo Rebate
+            d["Product Item"]       = pkg_name
+            d["Qty"]                = 1
+            d["Unit Price (RM)"]    = f"{receipt_total:.2f}"
+            d["Total Amount (RM)"]  = f"{receipt_total:.2f}"
+            d["Promo Rebate (RM)"]  = ""   # cleared — not needed
+            st.session_state["pkg_sub_items"]    = sub_items
+            st.session_state.pop("auto_items_for_pdf", None)
+            item_mode = None   # skip the old mode blocks below
+
+        else:
+            # ── ORIGINAL MODE (IGZ or AST custom price) ──────────────────
+            mode_opts = ["🤖 自动选品（Auto-Select）", "📦 手动选套餐（Manual Package）"]
+            cur_mode  = st.session_state.get("item_select_mode", mode_opts[0])
+            if cur_mode not in mode_opts:
+                cur_mode = mode_opts[0]
+            item_mode = st.radio("选择模式", mode_opts,
+                                 index=mode_opts.index(cur_mode),
+                                 horizontal=True, label_visibility="collapsed")
+            st.session_state["item_select_mode"] = item_mode
 
         # ══════════════════════════════════════════════════════════════
         # MODE A: AUTO-SELECT — algorithm picks items that sum > card_total
         #         then sets Promo Rebate to make final = card_total exactly
         # ══════════════════════════════════════════════════════════════
-        if item_mode == mode_opts[0]:
+        if item_mode is not None and item_mode == mode_opts[0]:
             if receipt_total > 0:
                 # Run or re-use cached suggestion
                 cache_key = f"auto_suggest_{receipt_total}_{company}"
