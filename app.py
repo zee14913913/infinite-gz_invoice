@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-INFINITE GZ + AI SMART TECH — Invoice Management System  v3 (patch-v12)
+INFINITE GZ + AI SMART TECH — Invoice Management System  v3 (patch-v12.5)
 =============================================================
 Changes vs v2:
   • IGZ: Items (JSON) → 4 cols: Product Item / Qty / Unit Price (RM) / Total Amount (RM)
@@ -41,6 +41,76 @@ RECEIPTS_DIR  = OUT_DIR / "receipts"
 INVOICES_DIR  = OUT_DIR / "invoices"
 for d in [RECEIPTS_DIR, INVOICES_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+CARD_MAP_FILE = OUT_DIR / "card_map.json"   # card last-4 → Bill To name
+
+# ── CC Management seed (from CC MANAGEMENT.xlsx – 61 entries) ────────────────
+# Automatically pre-seeds the card_map so Bill To is resolved without
+# manual setup on a fresh Streamlit Cloud deployment.
+CC_SEED: dict = {
+      "0066": "TAN YONG SHENG",
+      "0140": "CARRIE TONG",
+      "0235": "ANGELINE LEE POI LIN",
+      "0446": "CHIA VUI LEONG",
+      "0555": "SONG YEW CHUAN",
+      "0670": "HASAN",
+      "1259": "HASRUL",
+      "1470": "LAI FOOK HENG",
+      "1513": "CHIA VUI LEONG",
+      "1560": "CHIA VUI LEONG",
+      "1818": "CHOW KAH FEI",
+      "2033": "CHANG CHOON CHOW",
+      "2058": "CHANG CHOON CHOW",
+      "2322": "CHIA VUI LEONG",
+      "2385": "LEE E KAI",
+      "2404": "LYE PEI KUN",
+      "2530": "HASAN",
+      "2682": "YOONG MENG WEE",
+      "2978": "CHIA VUI LEONG",
+      "3041": "CARRIE TONG",
+      "3123": "GOH MUI HIM",
+      "3447": "OOI CHIEW FOONG",
+      "3576": "CHIA VUI LEONG",
+      "3687": "KHOR WEI LOONG",
+      "3717": "CHIA VUI LEONG",
+      "3770": "CHOW KAH FEI",
+      "3964": "LYE PEI KUN",
+      "3998": "LEE E KAI",
+      "4127": "LEOW HOOI SZE",
+      "4511": "CHIA VUI LEONG",
+      "4514": "CHANG CHOON CHOW",
+      "4523": "YEO CHUAN TZUN",
+      "4543": "CHIA VUI LEONG",
+      "5474": "SONG YEW CHUAN",
+      "5700": "CHIA VUI LEONG",
+      "5781": "YEO CHUAN TZUN",
+      "6003": "LAI FOOK HENG",
+      "6506": "LIM SHAN WEN",
+      "6821": "CHOW KAH FEI",
+      "6854": "CHIA VUI LEONG",
+      "6940": "LIM SHAN WEN",
+      "7427": "YEO CHUAN TZUN",
+      "7496": "YOONG MENG WEE",
+      "7531": "WOO WEN BIN",
+      "7698": "CHIA VUI LEONG",
+      "7770": "YEO CHUAN TZUN",
+      "7809": "TAN YONG SHENG",
+      "8036": "GOH MUI HIM",
+      "8074": "LEE CHEE HWA",
+      "8108": "CHIA VUI KHENG",
+      "8114": "CHIA VUI LEONG",
+      "8363": "CHIA VUI LEONG",
+      "8461": "CHANG CHOON CHOW",
+      "8564": "YOONG MENG WEE",
+      "8822": "CHEONG HSIU YEING",
+      "8887": "LIM SHAN WEN",
+      "8894": "CHIA VUI KHENG",
+      "9280": "LEOW HOOI SZE",
+      "9383": "WOO WEN BIN",
+      "9558": "LEE E KAI",
+      "9791": "LEE E KAI"
+    }
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  INFINITE GZ Product Catalogue  (from IGZ Transaction Reference v1.0)
@@ -240,6 +310,120 @@ IGZ_PACKAGES = {
         "[B-004] Compliance Report Generation",
     ],
 }
+
+# ══════════════════════════════════════════════════════════════════════
+#  Card → Bill To lookup helpers
+# ══════════════════════════════════════════════════════════════════════
+# ── GitHub-API helpers for card_map persistence ─────────────────────────────
+def _gh_cfg():
+    """Return (token, repo, branch) from Streamlit secrets, or (None,None,None)."""
+    try:
+        cfg = st.secrets.get("github", {})
+        return cfg.get("token"), cfg.get("repo"), cfg.get("branch", "main")
+    except Exception:
+        return None, None, None
+
+def _gh_get(token, repo, branch, path="card_map.json"):
+    """GET file from GitHub API. Returns (content_str, sha) or (None, None)."""
+    import urllib.request, base64 as _b64
+    url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "igz-invoice-app"
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+            content = _b64.b64decode(data["content"]).decode("utf-8")
+            return content, data["sha"]
+    except Exception:
+        return None, None
+
+def _gh_put(token, repo, branch, content_str, sha=None, path="card_map.json", msg="chore: update card_map"):
+    """PUT (create or update) file on GitHub."""
+    import urllib.request, base64 as _b64
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    body = {
+        "message": msg,
+        "content": _b64.b64encode(content_str.encode("utf-8")).decode("ascii"),
+        "branch": branch,
+    }
+    if sha:
+        body["sha"] = sha
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="PUT", headers={
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        "User-Agent": "igz-invoice-app"
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception as e:
+        st.warning(f"⚠️ GitHub sync failed: {e}")
+        return False
+
+def load_card_map() -> dict:
+    """Load card_map: GitHub first, then local JSON fallback.
+    Always merges CC_SEED so the 61 known cards are available
+    even on a fresh deployment (user edits take precedence).
+    """
+    merged: dict = dict(CC_SEED)          # start with built-in seed
+    token, repo, branch = _gh_cfg()
+    if token and repo:
+        content, _sha = _gh_get(token, repo, branch)
+        if content:
+            try:
+                remote = json.loads(content)
+                merged.update(remote)      # user edits override seed
+                return merged
+            except Exception:
+                pass
+    if CARD_MAP_FILE.exists():
+        try:
+            stored = json.loads(CARD_MAP_FILE.read_text(encoding="utf-8"))
+            merged.update(stored)          # user edits override seed
+        except Exception:
+            pass
+    return merged
+
+def save_card_map(m: dict) -> None:
+    """Save card_map to GitHub (auto-commit) + local fallback."""
+    content_str = json.dumps(m, ensure_ascii=False, indent=2)
+    try:
+        CARD_MAP_FILE.write_text(content_str, encoding="utf-8")
+    except Exception:
+        pass
+    token, repo, branch = _gh_cfg()
+    if token and repo:
+        _content, sha = _gh_get(token, repo, branch)
+        ok = _gh_put(token, repo, branch, content_str, sha=sha,
+                     msg="chore: update card_map via Streamlit UI")
+        if ok:
+            st.toast("💳 Card map synced to GitHub ✅", icon="✅")
+
+def lookup_bill_to(card_no: str) -> str:
+    """
+    Given a masked card number (e.g. '4617 72** **** 3964'),
+    extract last-4 digits and look up the cardholder name.
+    Returns name string or '' if not found.
+    """
+    if not card_no:
+        return ""
+    # Extract last 4 consecutive digits
+    digits = re.findall(r"[0-9]{4}", card_no.replace(" ", ""))
+    last4 = digits[-1] if digits else ""
+    if not last4:
+        # Fallback: grab last 4 chars that are digits
+        only_digits = re.sub(r"[^0-9]", "", card_no)
+        last4 = only_digits[-4:] if len(only_digits) >= 4 else ""
+    if not last4:
+        return ""
+    card_map = load_card_map()
+    return card_map.get(last4, "")
+
 
 def _packages(company: str) -> dict:
     """Return the package dict for the given company (uses same logic as _is_ast)."""
@@ -670,6 +854,13 @@ def parse_receipt(text: str, company: str) -> dict:
     ])
     d["Bill To"] = re.sub(r"\s+", " ", (raw_bill or "")).strip()
 
+    # ── Auto-lookup Bill To from card map if still empty ─────────
+    if not d["Bill To"] and d.get("Card No"):
+        _auto_bt = lookup_bill_to(d["Card No"])
+        if _auto_bt:
+            d["Bill To"] = _auto_bt
+            d["_bill_to_source"] = "card_map"   # flag for UI badge
+
     # ── Payment Type ─────────────────────────────────────────────
     # Detect from VISA CREDIT / MASTERCARD CREDIT / CASH etc.
     pay_raw = _s([
@@ -950,6 +1141,50 @@ def main():
 
         return
 
+
+    # ── Sidebar: Card Map Manager (always visible after company selected) ──
+    with st.sidebar:
+        st.markdown("### 📇 卡号对照表")
+        st.caption("卡尾4位 → 自动识别 Bill To（持卡人姓名）")
+        _cmap = load_card_map()
+
+        # ── Show existing entries ──────────────────────────────────
+        if _cmap:
+            st.markdown("**已登记的卡号：**")
+            _to_delete = None
+            for _l4, _nm in sorted(_cmap.items()):
+                _col1, _col2 = st.columns([3, 1])
+                _col1.markdown(f"**`**** {_l4}`** → {_nm}")
+                if _col2.button("🗑️", key=f"del_{_l4}", help=f"删除 {_l4}"):
+                    _to_delete = _l4
+            if _to_delete:
+                del _cmap[_to_delete]
+                save_card_map(_cmap)
+                st.success(f"已删除卡尾 {_to_delete}")
+                st.rerun()
+        else:
+            st.info("对照表为空，请添加第一张卡")
+
+        st.markdown("---")
+        st.markdown("**➕ 添加新卡**")
+        _new_l4   = st.text_input("卡尾4位数字", max_chars=4, key="new_card_last4",
+                                   placeholder="例：3964")
+        _new_name = st.text_input("持卡人姓名", key="new_card_name",
+                                   placeholder="例：Max Lai")
+        if st.button("✅ 保存", key="save_card_map"):
+            _new_l4 = re.sub(r"[^0-9]", "", _new_l4.strip())
+            _new_name = _new_name.strip()
+            if len(_new_l4) == 4 and _new_name:
+                _cmap[_new_l4] = _new_name
+                save_card_map(_cmap)
+                st.success(f"✅ 已保存：**** {_new_l4} → {_new_name}")
+                st.rerun()
+            else:
+                st.error("请输入正确的4位卡尾数字 + 持卡人姓名")
+
+        st.markdown("---")
+        st.caption("📌 对照表储存于 output/card_map.json\n下次启动自动载入")
+
     # ══════════════════════════════════════════════════════════════
     #  SCREEN 2 — Main workflow
     # ══════════════════════════════════════════════════════════════
@@ -961,7 +1196,7 @@ def main():
     <div style='background:{bar_col};color:#fff;padding:13px 20px;border-radius:10px;
                 display:flex;align-items:center;justify-content:space-between;margin-bottom:16px'>
         <span style='font-size:19px;font-weight:800'>{'💼' if is_ast else '🏢'} {company}</span>
-        <span style='font-size:11px;opacity:.7'>Invoice Management System v3 (OCR v12.2)</span>
+        <span style='font-size:11px;opacity:.7'>Invoice Management System v3 (OCR v12.5)</span>
     </div>""", unsafe_allow_html=True)
 
     if st.button("← 切换公司 / Switch Company"):
@@ -1014,7 +1249,11 @@ def main():
         st.markdown("---")
         st.markdown("<div class='section-title'>✏️ Step 2 · 确认 / 编辑内容</div>",
                     unsafe_allow_html=True)
-        st.info("📌 系统已自动解析收据。**需手动填写**的是：\n① 「Bill To」= 客户姓名/持卡人 \n② 「Company」= 客户公司名称（无则填 -）\n下拉菜单字段直接选择即可。")
+        _bt_from_map = st.session_state.parsed_data.get("_bill_to_source") == "card_map"
+        if _bt_from_map:
+            st.success("✅ 系统已自动解析收据，并从卡号对照表自动识别 **Bill To**。\n「Company」= 客户公司名称（无则填 -）")
+        else:
+            st.info("📌 系统已自动解析收据。\n① 「Bill To」= 卡号未在对照表中 → 请手动填写客户姓名\n② 「Company」= 客户公司名称（无则填 -）\n📇 可在右侧侧边栏「卡号对照表」添加新卡")
 
         d = st.session_state.parsed_data
         c1, c2 = st.columns(2)
@@ -1027,7 +1266,12 @@ def main():
                 help="系统自动去除 INV- 前缀，保留收据原始编号")
             d["Date"]        = st.text_input("Date", d.get("Date",""))
             d["Due Date"]    = st.text_input("Due Date", d.get("Due Date",""))
-            d["Bill To"]     = st.text_input("Bill To (持卡人/客户姓名 — 手动填写)", d.get("Bill To",""))
+            _bt_label = (
+                "Bill To 💳 (卡号对照表自动填入 — 可修改)"
+                if st.session_state.parsed_data.get("_bill_to_source") == "card_map"
+                else "Bill To (持卡人/客户姓名)"
+            )
+            d["Bill To"] = st.text_input(_bt_label, d.get("Bill To",""))
             d["Company"]     = st.text_input(
                 "⭐ Company (手动填写，无则填 -)",
                 d.get("Company",""),
