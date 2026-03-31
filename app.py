@@ -599,11 +599,11 @@ def parse_receipt(text: str, company: str) -> dict:
     # Invoice No is populated if the receipt is a tax invoice / OR
     # the user manually types it in Step 2.
     raw_inv = _s([
-        r"invoice\s*no\.?\s*[:\s]+([0-9A-Z\-_/]+)",
+        r"invoice\s*no[.:\s]+([0-9A-Z\-_/]+)",
         r"[il]nvoice\s*no\.?\s*[:\s]+([0-9A-Z\-_/]+)",
-        r"inv(?:oice)?\s*no\.?\s*[:\s]+([A-Z0-9_\-/]+)",
-        r"inv[-_]?no\.?\s*[:\s]+([A-Z0-9_\-/]+)",
-        r"inv\s+no\.?\s*[:\s]*([0-9]{3,})",
+        r"inv(?:oice)?\s*no[.:\s]+([A-Z0-9_\-/]+)",
+        r"inv[-_]?no[.:\s]+([A-Z0-9_\-/]+)",
+        r"inv\s*no[.:\s]+([0-9]{3,})",
         r"#\s*([0-9]{4,})",                    # #000962
         r"no\.\s*([0-9]{4,})",               # NO. 000962
         r"receipt\s*#\s*([0-9A-Z\-]{4,})",  # RECEIPT # 2026-001
@@ -611,16 +611,18 @@ def parse_receipt(text: str, company: str) -> dict:
     d["Invoice No"] = _clean_inv_no(raw_inv) if raw_inv else ""
 
     # ── Receipt No / Trace No ─────────────────────────────────────
-    # Covers: RECEIPT NO / TRACE NO / STAN / RRN / SEQ NO / HOST TRACE
+    # Covers: RECEIPT NO / TRACE NO. / RETRIEVAL REF NO / STAN / RRN / SEQ NO
+    # Also handles dots in labels: TRACE NO. / RETRIEVAL REF. NO.
     d["Receipt No"] = _s([
-        r"receipt\s*no\.?\s*:\s*trace\s*no\s*[\n\r]+\s*([0-9]+)",   # multiline HLB
-        r"receipt\s*no\.?\s*[:\s]+([0-9]{3,})",
-        r"trace\s*no\.?\s*[:\s]+([0-9]{3,})",
-        r"stan\s*/\s*trace\s*[:\s]+([0-9]{3,})",
-        r"stan\s*[:\s]+([0-9]{3,})",
+        r"receipt\s*no\.?\s*:\s*trace\s*no\.?\s*[\n\r]+\s*([0-9]+)",  # multiline HLB
+        r"receipt\s*no[.:\s]+([0-9]{3,})",
+        r"trace\s*no\.?\s*[.:\s]+([0-9]{3,})",                  # TRACE NO. / TRACE NO:
+        r"trace\s*number\s*[:\s]+([0-9]{3,})",
+        r"stan\s*/\s*trace[.:\s]+([0-9]{3,})",
+        r"stan[.:\s]+([0-9]{3,})",
         r"rrn\s*[:\s]+([0-9]{6,})",
-        r"seq\s*no\.?\s*[:\s]+([0-9]{3,})",
-        r"sequence\s*no\.?\s*[:\s]+([0-9]{3,})",
+        r"seq\s*no[.:\s]+([0-9]{3,})",
+        r"sequence\s*no[.:\s]+([0-9]{3,})",
         r"host\s*trace\s*[:\s]+([0-9]{3,})",
         r"trace[:\s]+([0-9]{3,})",
     ])
@@ -655,11 +657,18 @@ def parse_receipt(text: str, company: str) -> dict:
     ])
 
     # ── Bill To (merchant name on receipt = payee) ────────────────
-    d["Bill To"] = _s([
-        r"bill\s*to[\s.:]+([A-Za-z ]+?)(?:\n|company|payment)",
-        r"issued\s*to[\s.:]+([A-Za-z ]+?)(?:\n|company)",
+    # Covers: BILL TO / ISSUED TO / CARDHOLDER NAME / NAME: / CARD HOLDER
+    # Also handles Maybank-style (no label – grab caps after card no line)
+    raw_bill = _s([
+        r"bill\s*to[\s.:]+([A-Za-z0-9 .,'&/-]+?)(?=\n|company|payment|\Z)",
+        r"issued\s*to[\s.:]+([A-Za-z0-9 .,'&/-]+?)(?=\n|company|\Z)",
+        r"cardholder\s*name[\s.:]+([A-Za-z0-9 .,'&/-]+?)(?=\n|\Z)",
+        r"card\s*holder\s*name[\s.:]+([A-Za-z0-9 .,'&/-]+?)(?=\n|\Z)",
+        r"card\s*holder[\s.:]+([A-Za-z0-9 .,'&/-]+?)(?=\n|\Z)",
+        r"name[\s.:]+([A-Z][A-Za-z0-9 .,'&/-]{3,})(?=\n|\Z)",
+        r"(?:^|\n)([A-Z][A-Z0-9 .,'&/-]{5,})(?=\n)",   # Maybank: all-caps line after header
     ])
-    d["Bill To"] = re.sub(r"\s+", " ", d["Bill To"]).strip()
+    d["Bill To"] = re.sub(r"\s+", " ", (raw_bill or "")).strip()
 
     # ── Payment Type ─────────────────────────────────────────────
     # Detect from VISA CREDIT / MASTERCARD CREDIT / CASH etc.
@@ -675,11 +684,15 @@ def parse_receipt(text: str, company: str) -> dict:
     d["Payment Type"] = pay_map.get(_pay_key, pay_raw or "")
 
     # ── Card Type ────────────────────────────────────────────────
-    # Detect from: VISA CREDIT / VISA DEBIT / CREDIT CARD
+    # Payment Type = Visa / MasterCard / Amex (network)
+    # Card Type    = CREDIT / DEBIT (usage type)
+    # Priority: same-line "VISA CREDIT" → "CREDIT CARD" → "CARD TYPE:" → standalone word
     card_raw = _s([
-        r"(?:visa|master(?:card)?)\s+(credit|debit)",
-        r"(credit|debit)\s+card",
-        r"card\s*type[\s.:]+([A-Za-z]+)",
+        r"(?:visa|master(?:card)?|amex)\s+(credit|debit)",   # VISA CREDIT on same line
+        r"(credit|debit)\s+card",                              # CREDIT CARD
+        r"card\s*type[\s.:]+([A-Za-z]+)",                    # CARD TYPE: CREDIT
+        r"card\s*use\s*type[\s.:]+([A-Za-z]+)",             # CARD USE TYPE:
+        r"\b(credit|debit)\b",                               # standalone word fallback
     ])
     d["Card Type"] = (card_raw or "").upper() if card_raw else ""
 
@@ -691,30 +704,44 @@ def parse_receipt(text: str, company: str) -> dict:
     #   4617 XXXX XXXX 3964   (fully masked middle)
     #   CARD : 4617 72XX XXXX 3964
     _card_raw = _s([
+        # Standard 4-group masked formats: 4617 72XX XXXX 3964
         r"card\s*no\.?[\s.:]+([0-9]{4}[\s-][0-9X*x]{2,6}[\s-][0-9X*x ]{2,6}[\s-][0-9]{4})",
         r"card[:\s]+([0-9]{4}[\s-][0-9X*x]{2,6}[\s-][0-9X*x ]{2,6}[\s-][0-9]{4})",
         r"([0-9]{4}\s+[0-9X*x]{2,6}\s+[0-9X*x ]{2,}\s+[0-9]{4})",
+        # Full-star mask: ************8888 (Maybank style – 12 stars + last 4 digits)
+        r"card\s*no\.?[\s.:]+([*]{8,}\s*[0-9]{4})",
+        r"([*]{8,}[0-9]{4})",
+        # Looser catch-all with card no label
         r"card\s*no\.?[\s.:]+([0-9*Xx\s]{13,25})",
     ])
     # Normalise: replace lowercase x → X for consistency
     d["Card No"] = re.sub(r"x", "X", _card_raw).strip() if _card_raw else ""
 
     # ── Approval Code ────────────────────────────────────────────
-    d["Approval Code"] = _s([
+    # Pad to 6 chars with leading zeros (some banks strip leading zero, e.g. 85944 → 085944)
+    _appr_raw = _s([
         r"approval\s*code\s*[:\s]+([A-Z0-9]+)",
         r"approval\s*code[\s.:]+([A-Z0-9]+)",
+        r"auth(?:orisation)?\s*code[\s.:]+([A-Z0-9]+)",
+        r"auth\s*no\.?[\s.:]+([A-Z0-9]+)",
         r"approval[\s.:]+([A-Z0-9]+)",
     ])
+    # If purely numeric and shorter than 6 digits, left-pad with zeros
+    if _appr_raw and _appr_raw.isdigit() and len(_appr_raw) < 6:
+        _appr_raw = _appr_raw.zfill(6)
+    d["Approval Code"] = _appr_raw or ""
 
     # ── Ref No ───────────────────────────────────────────────────
-    # Covers: REF NO / REFERENCE NO / RETRIEVAL REF / HOST REF / RRN
+    # Covers: REF NO / REFERENCE NO / RETRIEVAL REF / RETRIEVAL REF. NO. / HOST REF
     d["Ref No"] = _s([
-        r"ref(?:erence)?\s*no\.?\s*[:\s]+([0-9A-Z]{6,})",
+        r"retrieval\s*ref\.?\s*no\.?\s*[:\s]+([0-9A-Z]{6,})",  # RETRIEVAL REF. NO.
         r"retrieval\s*ref(?:erence)?[:\s]+([0-9A-Z]{6,})",
+        r"ref(?:erence)?\s*no[.:\s]+([0-9A-Z]{6,})",
         r"host\s*ref(?:erence)?[:\s]+([0-9A-Z]{6,})",
         r"terminal\s*ref[:\s]+([0-9A-Z]{6,})",
+        r"ref\.?\s*no\.?\s*[:\s]+([0-9A-Z]{6,})",               # REF. NO. (with dots)
         r"\bref\b[:\s]+([0-9]{6,})",
-        r"ref\s+no\s+([0-9]{4,})",
+        r"ref\s*no[.:\s]+([0-9]{4,})",
     ])
 
     # ── Total ────────────────────────────────────────────────────
@@ -934,7 +961,7 @@ def main():
     <div style='background:{bar_col};color:#fff;padding:13px 20px;border-radius:10px;
                 display:flex;align-items:center;justify-content:space-between;margin-bottom:16px'>
         <span style='font-size:19px;font-weight:800'>{'💼' if is_ast else '🏢'} {company}</span>
-        <span style='font-size:11px;opacity:.7'>Invoice Management System v3</span>
+        <span style='font-size:11px;opacity:.7'>Invoice Management System v3 (OCR v12.2)</span>
     </div>""", unsafe_allow_html=True)
 
     if st.button("← 切换公司 / Switch Company"):
