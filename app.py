@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-INFINITE GZ + AI SMART TECH — Invoice Management System  v3
+INFINITE GZ + AI SMART TECH — Invoice Management System  v3 (patch-v12)
 =============================================================
 Changes vs v2:
   • IGZ: Items (JSON) → 4 cols: Product Item / Qty / Unit Price (RM) / Total Amount (RM)
@@ -244,6 +244,79 @@ IGZ_PACKAGES = {
 def _packages(company: str) -> dict:
     """Return the package dict for the given company (uses same logic as _is_ast)."""
     return AST_PACKAGES if _is_ast(company) else IGZ_PACKAGES
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Auto-Select Items Algorithm  (v12 new)
+# ══════════════════════════════════════════════════════════════════════
+def auto_select_items(card_total: float, company: str,
+                      min_items: int = 2, max_items: int = 5,
+                      min_over_pct: float = 0.3,
+                      max_over_pct: float = 25.0):
+    """
+    Find a combination of catalogue items whose sum EXCEEDS card_total by
+    min_over_pct..max_over_pct percent.  Returns (selected_list, promo_rebate)
+    where selected_list = [(name, price), ...] and promo_rebate < 0.
+    Returns ([], 0) if no valid combo found.
+
+    Algorithm:
+      1. Filter products with 0 < price <= card_total
+      2. Iterate combos from min_items to max_items
+      3. Pick combo with smallest positive overshoot within allowed range
+      4. If no combo found, relax max_over_pct to 40% and retry
+    """
+    import itertools
+    products = _products(company)
+    # Allow items up to 150% of card_total (enables single-item solutions for large amounts)
+    eligible = [(name, price) for name, price in products if 0 < price <= card_total * 1.5]
+
+    def _search(min_o, max_o):
+        lo = card_total * (1 + min_o / 100)
+        hi = card_total * (1 + max_o / 100)
+        best = None
+        best_score = float("inf")
+        for n in range(min_items, max_items + 1):
+            for combo in itertools.combinations(eligible, n):
+                total = sum(p for _, p in combo)
+                if lo <= total <= hi:
+                    overshoot_pct = (total - card_total) / card_total * 100
+                    score = overshoot_pct + n * 0.05   # prefer fewer items
+                    if score < best_score:
+                        best_score = score
+                        best = combo
+            if best:
+                break   # stop at fewest items that satisfy constraint
+        return best
+
+    combo = _search(min_over_pct, max_over_pct)
+    if combo is None:
+        combo = _search(min_over_pct, 40.0)   # relaxed fallback
+
+    # If still no combo, try combinations_with_replacement (allow repeated items)
+    if combo is None:
+        lo = card_total * (1 + min_over_pct / 100)
+        hi = card_total * (1 + 40.0 / 100)
+        best_rep = None
+        best_rep_score = float("inf")
+        for n in range(2, max_items + 2):
+            for combo_r in itertools.combinations_with_replacement(eligible, n):
+                total = sum(p for _, p in combo_r)
+                if lo <= total <= hi:
+                    overshoot_pct = (total - card_total) / card_total * 100
+                    score = overshoot_pct + n * 0.05
+                    if score < best_rep_score:
+                        best_rep_score = score
+                        best_rep = combo_r
+            if best_rep:
+                break
+        combo = best_rep
+
+    if combo:
+        subtotal = sum(p for _, p in combo)
+        promo    = -(subtotal - card_total)    # always negative
+        return list(combo), round(promo, 2)
+    return [], 0.0
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  Excel column definitions
@@ -521,25 +594,35 @@ def parse_receipt(text: str, company: str) -> dict:
         return ""
 
     # ── Invoice No ────────────────────────────────────────────────
-    # Matches: INV NO 000962 / INV NO. 000962 / INVOICE NO 000962
+    # Matches: INV NO 000962 / INVOICE NO / #000962 / NO. 000962
+    # NOTE: POS card receipts typically do NOT have invoice numbers.
+    # Invoice No is populated if the receipt is a tax invoice / OR
+    # the user manually types it in Step 2.
     raw_inv = _s([
-        r"invoice\s*no\.?\s*[:\s]+([0-9A-Z\-_]+)",
-        r"[il]nvoice\s*no\.?\s*[:\s]+([0-9]+)",
-        r"inv(?:oice)?\s*no\.?\s*[:\s]+([A-Z0-9_\-]+)",
-        r"inv[-_]?no\.?\s*[:\s]+([A-Z0-9_\-]+)",
-        r"inv\s+no\s+([0-9]{3,})",
+        r"invoice\s*no\.?\s*[:\s]+([0-9A-Z\-_/]+)",
+        r"[il]nvoice\s*no\.?\s*[:\s]+([0-9A-Z\-_/]+)",
+        r"inv(?:oice)?\s*no\.?\s*[:\s]+([A-Z0-9_\-/]+)",
+        r"inv[-_]?no\.?\s*[:\s]+([A-Z0-9_\-/]+)",
+        r"inv\s+no\.?\s*[:\s]*([0-9]{3,})",
+        r"#\s*([0-9]{4,})",                    # #000962
+        r"no\.\s*([0-9]{4,})",               # NO. 000962
+        r"receipt\s*#\s*([0-9A-Z\-]{4,})",  # RECEIPT # 2026-001
     ])
     d["Invoice No"] = _clean_inv_no(raw_inv) if raw_inv else ""
 
     # ── Receipt No / Trace No ─────────────────────────────────────
-    # Pattern order: multiline "RECEIPT NO : TRACE NO\n001685" first,
-    # then digits-only match (avoids capturing "TRACE" as the number)
+    # Covers: RECEIPT NO / TRACE NO / STAN / RRN / SEQ NO / HOST TRACE
     d["Receipt No"] = _s([
-        r"receipt\s*no\.?\s*:\s*trace\s*no\s*[\n\r]+\s*([0-9]+)",  # multiline
-        r"receipt\s*no\.?\s*[:\s]+([0-9]{3,})",                     # digits-only ≥3
-        r"trace\s*no\.?\s*[:\s]+([0-9]+)",
-        r"trace\s*no\s*[:\s]+([0-9]+)",
-        r"trace[:\s]+([0-9]+)",
+        r"receipt\s*no\.?\s*:\s*trace\s*no\s*[\n\r]+\s*([0-9]+)",   # multiline HLB
+        r"receipt\s*no\.?\s*[:\s]+([0-9]{3,})",
+        r"trace\s*no\.?\s*[:\s]+([0-9]{3,})",
+        r"stan\s*/\s*trace\s*[:\s]+([0-9]{3,})",
+        r"stan\s*[:\s]+([0-9]{3,})",
+        r"rrn\s*[:\s]+([0-9]{6,})",
+        r"seq\s*no\.?\s*[:\s]+([0-9]{3,})",
+        r"sequence\s*no\.?\s*[:\s]+([0-9]{3,})",
+        r"host\s*trace\s*[:\s]+([0-9]{3,})",
+        r"trace[:\s]+([0-9]{3,})",
     ])
 
     # ── Date ──────────────────────────────────────────────────────
@@ -601,12 +684,20 @@ def parse_receipt(text: str, company: str) -> dict:
     d["Card Type"] = (card_raw or "").upper() if card_raw else ""
 
     # ── Card No ──────────────────────────────────────────────────
-    # Matches: 4617 72** **** 3964
-    d["Card No"] = _s([
-        r"card\s*no\.?[\s.:]+([0-9]{4}\s+[0-9*]{2,6}\s+[*]{2,}\s+[0-9]{4})",
-        r"([0-9]{4}\s+[0-9*]{2,6}\s+[*]{2,}\s+[0-9]{4})",
-        r"card\s*no\.?[\s.:]+([0-9*X\s]{10,})",
+    # Matches many Malaysian POS formats:
+    #   4617 72** **** 3964   (asterisk mask)
+    #   4617 72XX XXXX 3964   (X mask, HLB/Maybank)
+    #   4617 72xx xxxx 3964   (lowercase x)
+    #   4617 XXXX XXXX 3964   (fully masked middle)
+    #   CARD : 4617 72XX XXXX 3964
+    _card_raw = _s([
+        r"card\s*no\.?[\s.:]+([0-9]{4}[\s-][0-9X*x]{2,6}[\s-][0-9X*x ]{2,6}[\s-][0-9]{4})",
+        r"card[:\s]+([0-9]{4}[\s-][0-9X*x]{2,6}[\s-][0-9X*x ]{2,6}[\s-][0-9]{4})",
+        r"([0-9]{4}\s+[0-9X*x]{2,6}\s+[0-9X*x ]{2,}\s+[0-9]{4})",
+        r"card\s*no\.?[\s.:]+([0-9*Xx\s]{13,25})",
     ])
+    # Normalise: replace lowercase x → X for consistency
+    d["Card No"] = re.sub(r"x", "X", _card_raw).strip() if _card_raw else ""
 
     # ── Approval Code ────────────────────────────────────────────
     d["Approval Code"] = _s([
@@ -616,19 +707,25 @@ def parse_receipt(text: str, company: str) -> dict:
     ])
 
     # ── Ref No ───────────────────────────────────────────────────
+    # Covers: REF NO / REFERENCE NO / RETRIEVAL REF / HOST REF / RRN
     d["Ref No"] = _s([
-        r"ref\s*no\.?\s*[:\s]+([0-9A-Z]+)",
-        r"ref(?:erence)?\s*no\.?[\s.:]+([0-9A-Z]+)",
-        r"ref\s+no\s+([0-9]+)",
+        r"ref(?:erence)?\s*no\.?\s*[:\s]+([0-9A-Z]{6,})",
+        r"retrieval\s*ref(?:erence)?[:\s]+([0-9A-Z]{6,})",
+        r"host\s*ref(?:erence)?[:\s]+([0-9A-Z]{6,})",
+        r"terminal\s*ref[:\s]+([0-9A-Z]{6,})",
+        r"\bref\b[:\s]+([0-9]{6,})",
+        r"ref\s+no\s+([0-9]{4,})",
     ])
 
     # ── Total ────────────────────────────────────────────────────
-    # Note: fallback r"rm\s*(...)$" removed — too greedy in multiline mode
+    # Covers: TOTAL RM 18888 / AMOUNT RM / RM 18888.00 (bare, last numeric)
     total_s = _s([
         r"total\s+rm\s*([\d,]+\.?\d*)",
         r"total[\s.:]+rm\s*([\d,]+\.?\d*)",
         r"amount[\s.:]+rm\s*([\d,]+\.?\d*)",
         r"(?:grand\s*)?total[:\s]+([\d,]+\.\d{2})",
+        r"^rm\s*([\d,]+\.\d{2})\s*$",   # bare "RM 18888.00" on its own line
+        r"rm\s*([1-9][\d,]{2,}\.\d{2})",  # RM followed by significant amount
     ])
     d["Total (RM)"] = float(total_s.replace(",","")) if total_s else ""
 
@@ -745,7 +842,10 @@ def main():
     # ── Session state ─────────────────────────────────────────────
     for k, v in [("company",None),("parsed_data",{}),("receipt_path",None),
                  ("excel_row",None),("invoice_done",False),("invoice_path",None),
-                 ("items_list",[])]:
+                 ("items_list",[]),
+                 ("item_select_mode","🤖 自动选品（Auto-Select）"),
+                 ("auto_suggest_items",[]),  ("auto_suggest_promo",0.0),
+                 ("auto_suggest_cache_key",""), ("auto_items_for_pdf",[])]:
         if k not in st.session_state:
             st.session_state[k] = v
 
@@ -943,25 +1043,15 @@ def main():
                 pass
             d["Total (RM)"]    = st.text_input("Total (RM)",    str(d.get("Total (RM)","")))
 
-        # ── Package Section (Combination 2: Predefined + Auto Sub-items) ──────
+        # ══════════════════════════════════════════════════════════════
+        # 🎯 SECTION: Auto-Suggest Product Items  (v12)
+        # ══════════════════════════════════════════════════════════════
         st.markdown("---")
         label_color = "#6B5B95" if is_ast else "#1A1A1A"
         co_label    = "AI 服务套餐" if is_ast else "IGZ 服务套餐"
         st.markdown(
-            f"<div class='section-title' style='color:{label_color}'>🎁 {co_label}</div>",
+            f"<div class='section-title' style='color:{label_color}'>🎯 产品组合 — 自动匹配收据金额</div>",
             unsafe_allow_html=True)
-
-        packages     = _packages(company)
-        pkg_names    = list(packages.keys())
-        cur_pkg      = st.session_state.get("selected_package", "")
-        idx_pkg      = pkg_names.index(cur_pkg) if cur_pkg in pkg_names else 0
-
-        selected_pkg = st.selectbox(
-            f"选择套餐（{co_label}）",
-            pkg_names,
-            index=idx_pkg,
-            help="选择套餐后自动带出包含项目，总价 = 收据金额，子项目价格显示 RM 0.00")
-        st.session_state["selected_package"] = selected_pkg
 
         # Receipt total (locked from OCR)
         receipt_total = 0.0
@@ -970,49 +1060,161 @@ def main():
         except:
             pass
 
-        sub_items = packages.get(selected_pkg, []) if selected_pkg else []
+        # ── MODE selector ─────────────────────────────────────────────
+        mode_opts = ["🤖 自动选品（Auto-Select）", "📦 手动选套餐（Manual Package）"]
+        cur_mode  = st.session_state.get("item_select_mode", mode_opts[0])
+        if cur_mode not in mode_opts:
+            cur_mode = mode_opts[0]
+        item_mode = st.radio("选择模式", mode_opts,
+                             index=mode_opts.index(cur_mode),
+                             horizontal=True, label_visibility="collapsed")
+        st.session_state["item_select_mode"] = item_mode
 
-        if selected_pkg:
-            # ── Package header line ────────────────────────────────────
-            st.markdown(f"""
-            <div style='background:#1e1e2e;border-radius:10px;padding:14px 18px;
-                        border-left:4px solid {label_color};margin:10px 0'>
-                <div style='color:#aaa;font-size:11px;margin-bottom:4px'>📦 PACKAGE</div>
-                <div style='color:#fff;font-size:15px;font-weight:700'>{selected_pkg}</div>
-                <div style='color:{label_color};font-size:18px;font-weight:800;margin-top:6px'>
-                    RM {receipt_total:,.2f}
-                    <span style='color:#666;font-size:12px;margin-left:8px'>= 收据金额 ✅</span>
-                </div>
-            </div>""", unsafe_allow_html=True)
+        # ══════════════════════════════════════════════════════════════
+        # MODE A: AUTO-SELECT — algorithm picks items that sum > card_total
+        #         then sets Promo Rebate to make final = card_total exactly
+        # ══════════════════════════════════════════════════════════════
+        if item_mode == mode_opts[0]:
+            if receipt_total > 0:
+                # Run or re-use cached suggestion
+                cache_key = f"auto_suggest_{receipt_total}_{company}"
+                if st.session_state.get("auto_suggest_cache_key") != cache_key:
+                    suggested_items, suggested_promo = auto_select_items(
+                        receipt_total, company)
+                    st.session_state["auto_suggest_items"]     = suggested_items
+                    st.session_state["auto_suggest_promo"]     = suggested_promo
+                    st.session_state["auto_suggest_cache_key"] = cache_key
+                else:
+                    suggested_items = st.session_state.get("auto_suggest_items", [])
+                    suggested_promo = st.session_state.get("auto_suggest_promo", 0.0)
 
-            # ── Sub-items display (RM 0.00 each) ────────────────────────
-            if sub_items:
-                st.markdown("**包含项目 (Including):**")
-                for item in sub_items:
-                    clean = re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", item)
-                    st.markdown(
-                        f"<div style='padding:5px 12px;margin:2px 0;border-radius:6px;"
-                        f"background:#0d0d1a;color:#888;font-size:13px'>"
-                        f"↳ {clean} &nbsp;&nbsp;"
-                        f"<span style='color:#444'>RM 0.00</span></div>",
-                        unsafe_allow_html=True)
+                if suggested_items:
+                    subtotal_auto = sum(p for _, p in suggested_items)
+                    promo_auto    = suggested_promo   # negative value
+                    final_auto    = subtotal_auto + promo_auto  # = card_total
+
+                    # ── Display suggestion box ─────────────────────────────
+                    st.markdown(f"""
+                    <div style='background:#0d1a0d;border-radius:12px;padding:16px 20px;
+                                border-left:4px solid #22c55e;margin:10px 0'>
+                        <div style='color:#86efac;font-size:11px;margin-bottom:6px'>
+                            🤖 AUTO-SELECTED — 系统自动选品，Subtotal 稍高于刷卡金额，
+                            通过 Promo Rebate 精确还原
+                        </div>
+                        <div style='color:#fff;font-size:20px;font-weight:900'>
+                            RM {subtotal_auto:,.2f}
+                            <span style='color:#f87171;font-size:14px;margin-left:8px'>
+                                Promo {promo_auto:+,.2f}
+                            </span>
+                            <span style='color:#4ade80;font-size:14px;margin-left:8px'>
+                                = RM {final_auto:,.2f} ✅
+                            </span>
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+                    # ── Item breakdown ─────────────────────────────────────
+                    st.markdown("**选中产品明细：**")
+                    for name, price in suggested_items:
+                        clean = re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", name)
+                        st.markdown(
+                            f"<div style='padding:5px 12px;margin:2px 0;border-radius:6px;"
+                            f"background:#0a1a0a;color:#86efac;font-size:13px'>"
+                            f"✅ {clean} &nbsp;&nbsp;"
+                            f"<span style='color:#4ade80;font-weight:700'>RM {price:,.2f}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True)
+
+                    # ── Write values to d ──────────────────────────────────
+                    # Join item names as comma-separated for Product Item column
+                    item_names_joined = "; ".join(
+                        re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", n)
+                        for n, p in suggested_items)
+                    d["Product Item"]       = item_names_joined
+                    d["Qty"]                = len(suggested_items)
+                    d["Unit Price (RM)"]    = f"{subtotal_auto / len(suggested_items):.2f}"
+                    d["Total Amount (RM)"]  = f"{subtotal_auto:.2f}"
+                    d["Subtotal (RM)"]      = f"{subtotal_auto:.2f}"
+                    d["Promo Rebate (RM)"]  = f"{promo_auto:.2f}"   # e.g. "-112.00"
+                    d["Total (RM)"]         = f"{final_auto:.2f}"
+
+                    # Store for PDF (each item as separate line)
+                    st.session_state["pkg_sub_items"] = [n for n, p in suggested_items]
+                    st.session_state["auto_items_for_pdf"] = [
+                        {"desc": re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", n),
+                         "unit_price": float(p), "qty": 1, "amount": float(p)}
+                        for n, p in suggested_items
+                    ]
+
+                    # ── Refresh button ──────────────────────────────────────
+                    if st.button("🔄 重新选品（换一组组合）", key="btn_refresh_auto"):
+                        st.session_state.pop("auto_suggest_cache_key", None)
+                        st.rerun()
+
+                else:
+                    st.warning("⚠️ 当前产品目录中无法找到合适的组合，请切换到手动选套餐模式。")
+                    st.session_state["pkg_sub_items"] = []
+                    st.session_state.pop("auto_items_for_pdf", None)
+                    d["Product Item"] = ""
             else:
-                st.info("ℹ️ Custom Package — 子项目将由您手动填写在 Remarks 栏")
+                st.info("ℹ️ 请先确认 Total (RM) 金额，系统将据此自动选品。")
+                st.session_state["pkg_sub_items"] = []
+                st.session_state.pop("auto_items_for_pdf", None)
 
-            # Set invoice items for PDF
-            d["Product Item"]      = selected_pkg
-            d["Qty"]               = 1
-            d["Unit Price (RM)"]   = f"{receipt_total:.2f}"
-            d["Total Amount (RM)"] = f"{receipt_total:.2f}"
-
-            # Store sub-items in session for PDF
-            st.session_state["pkg_sub_items"] = sub_items
-
+        # ══════════════════════════════════════════════════════════════
+        # MODE B: MANUAL PACKAGE — original dropdown selector
+        # ══════════════════════════════════════════════════════════════
         else:
-            st.session_state["pkg_sub_items"] = []
-            d["Product Item"] = ""
-            d["Unit Price (RM)"] = ""
-            d["Total Amount (RM)"] = ""
+            packages  = _packages(company)
+            pkg_names = list(packages.keys())
+            cur_pkg   = st.session_state.get("selected_package", "")
+            idx_pkg   = pkg_names.index(cur_pkg) if cur_pkg in pkg_names else 0
+
+            selected_pkg = st.selectbox(
+                f"选择套餐（{co_label}）",
+                pkg_names,
+                index=idx_pkg,
+                help="选择套餐后自动带出包含项目，总价 = 收据金额")
+            st.session_state["selected_package"] = selected_pkg
+
+            sub_items = packages.get(selected_pkg, []) if selected_pkg else []
+
+            if selected_pkg:
+                st.markdown(f"""
+                <div style='background:#1e1e2e;border-radius:10px;padding:14px 18px;
+                            border-left:4px solid {label_color};margin:10px 0'>
+                    <div style='color:#aaa;font-size:11px;margin-bottom:4px'>📦 PACKAGE</div>
+                    <div style='color:#fff;font-size:15px;font-weight:700'>{selected_pkg}</div>
+                    <div style='color:{label_color};font-size:18px;font-weight:800;margin-top:6px'>
+                        RM {receipt_total:,.2f}
+                        <span style='color:#666;font-size:12px;margin-left:8px'>= 收据金额 ✅</span>
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+                if sub_items:
+                    st.markdown("**包含项目 (Including):**")
+                    for item in sub_items:
+                        clean = re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", item)
+                        st.markdown(
+                            f"<div style='padding:5px 12px;margin:2px 0;border-radius:6px;"
+                            f"background:#0d0d1a;color:#888;font-size:13px'>"
+                            f"↳ {clean} &nbsp;&nbsp;"
+                            f"<span style='color:#444'>RM 0.00</span></div>",
+                            unsafe_allow_html=True)
+                else:
+                    st.info("ℹ️ Custom Package — 子项目将由您手动填写在 Remarks 栏")
+
+                d["Product Item"]      = selected_pkg
+                d["Qty"]               = 1
+                d["Unit Price (RM)"]   = f"{receipt_total:.2f}"
+                d["Total Amount (RM)"] = f"{receipt_total:.2f}"
+                st.session_state["pkg_sub_items"]    = sub_items
+                st.session_state.pop("auto_items_for_pdf", None)
+            else:
+                st.session_state["pkg_sub_items"] = []
+                st.session_state.pop("auto_items_for_pdf", None)
+                d["Product Item"] = ""
+                d["Unit Price (RM)"] = ""
+                d["Total Amount (RM)"] = ""
 
         d["Remarks"] = st.text_area("Remarks", d.get("Remarks", ""), height=60)
         st.session_state.parsed_data = d
@@ -1032,24 +1234,29 @@ def main():
                         pkg_name  = d.get("Product Item", "Services Rendered") or "Services Rendered"
                         sub_items = st.session_state.get("pkg_sub_items", [])
 
-                        # Main package line
-                        items_list = [{
-                            "desc":       pkg_name,
-                            "unit_price": receipt_total,
-                            "qty":        1,
-                            "amount":     receipt_total,
-                            "is_package": True,
-                        }]
-                        # Sub-items at RM 0.00
-                        for si in sub_items:
-                            clean_si = re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", si)
-                            items_list.append({
-                                "desc":       f"↳ {clean_si}",
-                                "unit_price": 0.0,
+                        # ── Use auto-selected items if available (Mode A) ────
+                        auto_pdf_items = st.session_state.get("auto_items_for_pdf", [])
+                        if auto_pdf_items:
+                            # Each item is already a dict with desc/unit_price/qty/amount
+                            items_list = auto_pdf_items
+                        else:
+                            # Mode B: single package line + sub-items at RM 0.00
+                            items_list = [{
+                                "desc":       pkg_name,
+                                "unit_price": receipt_total,
                                 "qty":        1,
-                                "amount":     0.0,
-                                "is_subitem": True,
-                            })
+                                "amount":     receipt_total,
+                                "is_package": True,
+                            }]
+                            for si in sub_items:
+                                clean_si = re.sub(r"^\[[A-Z]-\d{3}\]\s*", "", si)
+                                items_list.append({
+                                    "desc":       f"↳ {clean_si}",
+                                    "unit_price": 0.0,
+                                    "qty":        1,
+                                    "amount":     0.0,
+                                    "is_subitem": True,
+                                })
 
                         pdf_p    = generate_invoice_pdf(company, d, inv_no, items_list)
                         inv_link = str(pdf_p)
